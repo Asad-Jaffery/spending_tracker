@@ -5,7 +5,9 @@
 Spend Tracker is a single-user Python tool that imports transaction CSVs through
 a local command, normalizes merchant names, classifies spending, and produces
 deterministic analytics. Supabase-hosted PostgreSQL is the intended database.
-Jev will classify previously unseen merchants once its integration is chosen.
+Jev will classify previously unseen merchants through jevmodel.org, the selected
+gateway for the initial integration. Its API behavior and current limits still
+need to be verified with a live request.
 The current prototype may still include an API; the revised spec does not
 require a web server.
 
@@ -20,8 +22,8 @@ stored merchant mapping or Jev → persistence → analytics and manual correcti
 3. Reuse known merchant classifications; isolate Jev behind a replaceable interface.
 4. Support transaction-only and merchant-wide category corrections.
 5. Add deterministic summaries and prepare the PostgreSQL schema and connection.
-6. Connect the real Jev provider and Supabase, then evaluate classification quality
-   with labeled examples before trusting predictions at scale.
+6. Connect Jev through jevmodel.org and connect Supabase, then evaluate
+   classification quality with labeled examples before trusting predictions at scale.
 
 ## Design guidelines
 
@@ -33,6 +35,8 @@ stored merchant mapping or Jev → persistence → analytics and manual correcti
   fails or returns an invalid category, use `Other` with a review flag and do
   not save a mapping for that failed attempt.
 - Do not pretend Jev is connected. The app must work without external credentials.
+- Keep the Jev integration behind a replaceable interface so the gateway can
+  change without changing classification rules. Do not commit API keys.
 - A transaction-only correction must not change merchant mappings. A merchant-wide
   correction updates the mapping and all existing transactions for that merchant.
 - Be conservative when detecting duplicates and merging merchant names.
