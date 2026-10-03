@@ -1,17 +1,21 @@
 # Spend Tracker — Core Architecture
 
+This is the intended project design. The existing prototype may differ from it.
+
 ## Goal
 
 Spend Tracker ingests transaction CSV files, normalizes merchant names, classifies transactions into spending categories, stores the results in Postgres, and supports corrections that improve future classification behavior.
 
-The project is intentionally scoped around the backend architecture and classification system.
+The project is intentionally scoped around a local import pipeline and the
+classification system. A Python command reads CSV files directly; no upload
+endpoint or running web server is required.
 
 Core flow:
 
 ```text
 CSV
  ↓
-FastAPI ingestion
+Local Python import command
  ↓
 Parse + validate
  ↓
@@ -29,18 +33,20 @@ Analytics
 ## Tech Stack
 
 - Python
-- FastAPI
 - Supabase-hosted PostgreSQL
 - Jev for merchant classification
 - CSV transaction files as input
 
-No Plaid, PDF ingestion, multi-user system, or complicated authentication is needed for the initial version.
+No web server, Plaid, PDF ingestion, multi-user system, frontend, or
+complicated authentication is needed for the initial version.
 
 ---
 
 # Transaction Ingestion
 
-A CSV file is uploaded and sent to the FastAPI backend.
+A local Python command takes a CSV file path, parses it, and reports how many
+rows were imported, skipped as duplicates, or rejected. It does not need a
+long-running service.
 
 Different institutions may have different column names or formats, but each parser should convert transactions into the same internal representation.
 
@@ -117,20 +123,28 @@ Known merchant?
  ↓                ↓
 Use stored      Call Jev
 category            ↓
-                Validate result
-                    ↓
-               Store mapping
-                    ↓
-                 Category
+                Valid category?
+               /               \
+             yes                no
+              ↓                  ↓
+       Store Jev mapping     Other + review flag
+              ↓              (no mapping saved)
+         Use category
 ```
 
-Initial classification priority:
+Classification priority:
 
 ```text
 1. Known merchant mapping
 2. Jev classification for unseen merchants
-3. CSV-provided category as fallback, if available
+3. `Other` with a review flag if Jev is unavailable, fails, or returns an
+   invalid category
 ```
+
+CSV category labels are ignored, whether present or absent. Every valid Jev
+category is saved as the merchant mapping regardless of confidence. Confidence,
+if provided, is metadata and does not change that decision. A failed or invalid
+Jev response does not create a merchant mapping.
 
 ---
 
@@ -194,7 +208,7 @@ blue bottle coffee
 
 No existing merchant mapping is found.
 
-The backend asks Jev to choose from a constrained category set such as:
+The import pipeline asks Jev to choose from a constrained category set such as:
 
 ```text
 Groceries
@@ -211,7 +225,7 @@ Transfers
 Other
 ```
 
-Jev might return:
+Jev might return (the confidence field is optional):
 
 ```json
 {
@@ -286,7 +300,7 @@ but the user changes a Costco transaction to:
 Groceries
 ```
 
-The application should ask:
+A local correction command should let the user choose:
 
 ```text
 Apply this change to:
@@ -347,12 +361,19 @@ Check merchant_mappings
  ↓           ↓
 Use        Jev
 mapping      ↓
-          Save mapping
-             ↓
-          Use category
-             ↓
-       Store transaction
+        Valid category?
+         /          \
+       yes           no
+        ↓             ↓
+   Save mapping   Other + review flag
+        ↓         (no mapping saved)
+   Use category
+        ↓
+   Store transaction
 ```
+
+Both outcomes are stored as transactions. Only the valid Jev result creates a
+merchant mapping.
 
 Later:
 
@@ -403,7 +424,7 @@ Possible `classification_source` values:
 merchant_mapping
 jev
 manual
-csv
+unclassified
 ```
 
 ## merchant\_mappings
@@ -449,7 +470,7 @@ created_at
 
 # Duplicate Handling
 
-Uploading the same CSV twice should not create duplicate transactions.
+Importing the same CSV twice should not create duplicate transactions.
 
 Where possible, use a transaction identifier provided by the source.
 
@@ -556,14 +577,11 @@ But aggressive normalization can accidentally merge unrelated merchants.
 
 We need to define the initial normalization rules and test them.
 
-### How should confidence scores be used?
+### How should confidence scores be evaluated?
 
-If Jev returns a low-confidence prediction, we need to decide whether to:
-
-- accept it
-- assign `Other`
-- flag it for review
-- use another fallback
+A valid Jev category is always accepted and stored for the merchant. If Jev
+provides confidence, retain it for later analysis of classification quality; it
+is not an acceptance threshold.
 
 ### How should duplicate detection work?
 
@@ -571,12 +589,9 @@ We need a strategy that prevents duplicate imports without incorrectly deleting 
 
 ### What happens if Jev is unavailable?
 
-Possible behavior:
-
-- retry
-- leave the transaction uncategorized
-- use `Other`
-- queue the merchant for classification later
+Assign `Other`, flag the transaction for review, and do not save a merchant
+mapping for the failed attempt. A later import can try Jev again. An automatic
+retry queue remains a possible follow-up feature.
 
 ### How do we handle merchant-level corrections?
 
@@ -586,7 +601,8 @@ When the user selects:
 Apply to all transactions from Costco
 ```
 
-we need to decide whether to immediately update every existing Costco transaction or only apply the new mapping going forward.
+Update every existing Costco transaction and the merchant mapping. Future
+imports then use the corrected mapping.
 
 ### How do we test the classification engine?
 
