@@ -1,1 +1,1 @@
-"""Spend Tracker backend."""
+"""Local Spend Tracker import and classification tool."""

@@ -1,8 +1,7 @@
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
-
-from pydantic import BaseModel, ConfigDict, Field
 
 
 class Category(StrEnum):
@@ -24,19 +23,18 @@ class ClassificationSource(StrEnum):
     MERCHANT_MAPPING = "merchant_mapping"
     JEV = "jev"
     MANUAL = "manual"
-    CSV = "csv"
     UNCLASSIFIED = "unclassified"
 
 
-class Prediction(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+@dataclass(frozen=True)
+class Prediction:
     category: Category
-    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    confidence: float | None = None
 
 
-class CanonicalTransaction(BaseModel):
+@dataclass(frozen=True)
+class CanonicalTransaction:
     date: date
-    raw_description: str = Field(min_length=1, max_length=500)
-    amount: Decimal = Field(max_digits=12, decimal_places=2, allow_inf_nan=False)
-    source_transaction_id: str | None = Field(default=None, max_length=200)
-    csv_category: Category | None = None
+    raw_description: str
+    amount: Decimal
+    source_transaction_id: str | None = None

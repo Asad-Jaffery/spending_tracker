@@ -1,233 +1,209 @@
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
-from datetime import date
+import math
+from collections import defaultdict
+from datetime import UTC, datetime
 from decimal import Decimal
-
-from sqlalchemy import func, select, text, update
-from sqlalchemy.orm import Session
+from uuid import uuid4
 
 from spend_tracker.classifiers import MerchantClassifier, UnconfiguredJevClassifier
-from spend_tracker.domain import Category, ClassificationSource, Prediction
-from spend_tracker.models import ImportRun, MerchantMapping, Transaction
-from spend_tracker.parsing import ParsedCsv
+from spend_tracker.domain import Category, ClassificationSource
+from spend_tracker.parsing import ParsedInput
 
 logger = logging.getLogger(__name__)
 
 
-def digest(*parts) -> str:
+def digest(*parts: object) -> str:
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 
-def lock_writes(session: Session):
-    # All API writes use this transaction-scoped lock on Postgres. SQLite writes
-    # are serialized by the app's lock; local SQLite mode requires one worker.
-    if session.bind.dialect.name == "postgresql":
-        session.execute(text("SELECT pg_advisory_xact_lock(763924510)"))
-
-
-@dataclass(frozen=True)
-class Decision:
-    category: Category
-    source: ClassificationSource
-    needs_review: bool = False
-
-
-class ClassificationEngine:
-    def __init__(self, session: Session, classifier: MerchantClassifier, min_confidence: float):
-        self.session = session
-        self.classifier = classifier
-        self.min_confidence = min_confidence
-        self.attempted: set[str] = set()
-        self.attempt_count = 0
-
-    def classify(self, merchant: str, csv_category: Category | None) -> Decision:
-        mapping = self.session.scalar(
-            select(MerchantMapping).where(MerchantMapping.normalized_merchant == merchant)
-        )
-        if mapping:
-            return Decision(mapping.category, ClassificationSource.MERCHANT_MAPPING)
-        if merchant not in self.attempted:
-            self.attempted.add(merchant)
-            if not isinstance(self.classifier, UnconfiguredJevClassifier):
-                self.attempt_count += 1
-            try:
-                raw_prediction = self.classifier.classify(merchant, tuple(Category))
-                prediction = (
-                    Prediction.model_validate(raw_prediction)
-                    if raw_prediction is not None
-                    else None
-                )
-            except Exception as exc:
-                # Provider failures must not abort an import or leak descriptions/secrets.
-                logger.warning("Classifier failed (%s); using fallback", type(exc).__name__)
-                prediction = None
-            if prediction and prediction.confidence >= self.min_confidence:
-                self.session.add(
-                    MerchantMapping(
-                        normalized_merchant=merchant,
-                        display_name=merchant.title(),
-                        category=prediction.category,
-                        confidence=prediction.confidence,
-                        source=ClassificationSource.JEV,
-                    )
-                )
-                self.session.flush()
-                return Decision(prediction.category, ClassificationSource.JEV)
-        if csv_category:
-            return Decision(csv_category, ClassificationSource.CSV)
-        return Decision(Category.OTHER, ClassificationSource.UNCLASSIFIED, needs_review=True)
+def timestamp() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def import_transactions(
-    session: Session,
+    state: dict,
+    parsed: ParsedInput,
     *,
-    parsed: ParsedCsv,
     filename: str,
     content: bytes,
     source: str,
     currency: str,
     classifier: MerchantClassifier,
-    min_confidence: float,
-) -> ImportRun:
-    lock_writes(session)
+) -> dict:
+    source = source.strip().casefold()
+    if not source or len(source) > 100:
+        raise ValueError("Source must contain 1–100 characters")
+    if len(currency) != 3 or not currency.isalpha() or currency != currency.upper():
+        raise ValueError("Currency must be a three-letter uppercase code")
+    run = {
+        "id": str(uuid4()),
+        "filename": filename,
+        "source": source,
+        "rows_processed": parsed.rows_processed,
+        "rows_imported": 0,
+        "duplicates_skipped": 0,
+        "possible_duplicates": 0,
+        "rows_failed": len(parsed.errors),
+        "jev_attempts": 0,
+        "jev_failures": 0,
+        "errors": parsed.errors,
+        "created_at": timestamp(),
+    }
     file_hash = hashlib.sha256(content).hexdigest()
-    run = ImportRun(
-        filename=filename,
-        source=source,
-        file_sha256=file_hash,
-        rows_processed=parsed.rows_processed,
-        rows_imported=0,
-        duplicates_skipped=0,
-        possible_duplicates=0,
-        rows_failed=len(parsed.errors),
-        errors=parsed.errors,
-    )
-    session.add(run)
-    session.flush()
-    engine = ClassificationEngine(session, classifier, min_confidence)
+    known_keys = {item["dedupe_key"] for item in state["transactions"]}
+    known_fingerprints = {item["fingerprint"] for item in state["transactions"]}
+    attempted: set[str] = set()
+    mappings = state["merchant_mappings"]
     for row in parsed.rows:
         item = row.transaction
         cents = int(item.amount * 100)
-        # Include account/source, but not filename: renaming an identical file is safe.
         key = (
             digest("id", source, item.source_transaction_id)
             if item.source_transaction_id
             else digest("file-row", source, file_hash, row.line)
         )
-        if session.scalar(select(Transaction.id).where(Transaction.dedupe_key == key)):
-            run.duplicates_skipped += 1
+        if key in known_keys:
+            run["duplicates_skipped"] += 1
             continue
         fingerprint = digest(
             source, item.date.isoformat(), cents, currency, item.raw_description.casefold().strip()
         )
-        # A matching fingerprint alone is not proof of a duplicate purchase.
-        possible_duplicate = bool(
-            session.scalar(select(Transaction.id).where(Transaction.fingerprint == fingerprint))
+        possible_duplicate = fingerprint in known_fingerprints
+        merchant = row.merchant
+        if merchant in mappings:
+            category = Category(mappings[merchant]["category"])
+            classification_source = ClassificationSource.MERCHANT_MAPPING
+            needs_review = False
+        else:
+            category = Category.OTHER
+            classification_source = ClassificationSource.UNCLASSIFIED
+            needs_review = True
+            if merchant not in attempted:
+                attempted.add(merchant)
+                if not isinstance(classifier, UnconfiguredJevClassifier):
+                    run["jev_attempts"] += 1
+                try:
+                    prediction = classifier.classify(merchant, tuple(Category))
+                    if prediction is not None:
+                        predicted_category = Category(prediction.category)
+                        confidence = prediction.confidence
+                        if confidence is not None:
+                            try:
+                                confidence = float(confidence)
+                            except (TypeError, ValueError):
+                                confidence = None
+                            if confidence is not None and (
+                                not math.isfinite(confidence) or not 0 <= confidence <= 1
+                            ):
+                                confidence = None
+                        category = predicted_category
+                        classification_source = ClassificationSource.JEV
+                        needs_review = False
+                        now = timestamp()
+                        mappings[merchant] = {
+                            "normalized_merchant": merchant,
+                            "display_name": merchant.title(),
+                            "category": category.value,
+                            "confidence": confidence,
+                            "source": ClassificationSource.JEV.value,
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                    elif not isinstance(classifier, UnconfiguredJevClassifier):
+                        run["jev_failures"] += 1
+                except Exception as exc:
+                    run["jev_failures"] += 1
+                    logger.warning("Classifier failed (%s); using Other", type(exc).__name__)
+        state["transactions"].append(
+            {
+                "id": str(uuid4()),
+                "import_run_id": run["id"],
+                "source": source,
+                "source_transaction_id": item.source_transaction_id,
+                "dedupe_key": key,
+                "fingerprint": fingerprint,
+                "date": item.date.isoformat(),
+                "raw_description": item.raw_description,
+                "normalized_merchant": merchant,
+                "amount_cents": cents,
+                "currency": currency,
+                "category": category.value,
+                "classification_source": classification_source.value,
+                "needs_review": needs_review,
+                "possible_duplicate": possible_duplicate,
+                "created_at": timestamp(),
+            }
         )
-        decision = engine.classify(row.merchant, item.csv_category)
-        session.add(
-            Transaction(
-                import_run_id=run.id,
-                source=source,
-                source_transaction_id=item.source_transaction_id,
-                dedupe_key=key,
-                fingerprint=fingerprint,
-                date=item.date,
-                raw_description=item.raw_description,
-                normalized_merchant=row.merchant,
-                amount_cents=cents,
-                currency=currency,
-                category=decision.category,
-                classification_source=decision.source,
-                needs_review=decision.needs_review,
-                possible_duplicate=possible_duplicate,
-            )
-        )
-        session.flush()
-        run.rows_imported += 1
-        run.possible_duplicates += int(possible_duplicate)
-    run.jev_attempts = engine.attempt_count
-    session.flush()
+        known_keys.add(key)
+        known_fingerprints.add(fingerprint)
+        run["rows_imported"] += 1
+        run["possible_duplicates"] += int(possible_duplicate)
+    state["import_runs"].append(run)
     return run
 
 
-def correct_category(session: Session, transaction_id: str, category: Category, scope: str) -> int:
-    lock_writes(session)
-    transaction = session.get(Transaction, transaction_id)
+def correct_category(
+    state: dict, transaction_id: str, category: Category, scope: str = "transaction"
+) -> int:
+    transaction = next(
+        (item for item in state["transactions"] if item["id"] == transaction_id), None
+    )
     if transaction is None:
-        raise LookupError("Transaction not found")
+        raise ValueError("Transaction not found")
+    if scope not in {"transaction", "merchant"}:
+        raise ValueError("Scope must be transaction or merchant")
     if scope == "transaction":
-        transaction.category = category
-        transaction.classification_source = ClassificationSource.MANUAL
-        transaction.needs_review = False
-        return 1
-    merchant = transaction.normalized_merchant
-    mapping = session.scalar(
-        select(MerchantMapping).where(MerchantMapping.normalized_merchant == merchant)
-    )
-    if mapping is None:
-        mapping = MerchantMapping(normalized_merchant=merchant, display_name=merchant.title())
-        session.add(mapping)
-    mapping.category = category
-    mapping.source = ClassificationSource.MANUAL
-    mapping.confidence = None
-    result = session.execute(
-        update(Transaction)
-        .where(Transaction.normalized_merchant == merchant)
-        .values(
-            category=category, classification_source=ClassificationSource.MANUAL, needs_review=False
-        )
-    )
-    return result.rowcount
+        targets = [transaction]
+    else:
+        merchant = transaction["normalized_merchant"]
+        targets = [
+            item for item in state["transactions"] if item["normalized_merchant"] == merchant
+        ]
+        now = timestamp()
+        previous = state["merchant_mappings"].get(merchant)
+        state["merchant_mappings"][merchant] = {
+            "normalized_merchant": merchant,
+            "display_name": merchant.title(),
+            "category": category.value,
+            "confidence": None,
+            "source": ClassificationSource.MANUAL.value,
+            "created_at": previous["created_at"] if previous else now,
+            "updated_at": now,
+        }
+    for item in targets:
+        item["category"] = category.value
+        item["classification_source"] = ClassificationSource.MANUAL.value
+        item["needs_review"] = False
+    return len(targets)
 
 
 def money(cents: int) -> str:
     return str((Decimal(cents) / 100).quantize(Decimal("0.01")))
 
 
-def spending_summary(
-    session: Session, currency: str, date_from: date | None, date_to: date | None
-) -> dict:
-    conditions = [
-        Transaction.currency == currency,
-        Transaction.category.notin_([Category.INCOME, Category.TRANSFERS]),
-    ]
-    if date_from:
-        conditions.append(Transaction.date >= date_from)
-    if date_to:
-        conditions.append(Transaction.date <= date_to)
-    # Integer aggregation is exact on SQLite and PostgreSQL. Refunds reduce spending.
-    groups = session.execute(
-        select(
-            Transaction.date,
-            Transaction.category,
-            Transaction.normalized_merchant,
-            func.sum(Transaction.amount_cents),
-            func.count(),
-        )
-        .where(*conditions)
-        .group_by(Transaction.date, Transaction.category, Transaction.normalized_merchant)
-    ).all()
-    categories, months, merchants = {}, {}, {}
-    total, count = 0, 0
-    for day, category, merchant, cents, number in groups:
-        cents = int(cents)
-        total += cents
-        count += number
-        categories[category.value] = categories.get(category.value, 0) + cents
-        month = day.strftime("%Y-%m")
-        months[month] = months.get(month, 0) + cents
-        merchants[merchant] = merchants.get(merchant, 0) + cents
+def spending_summary(state: dict, *, currency: str = "USD") -> dict:
+    categories: dict[str, int] = defaultdict(int)
+    months: dict[str, int] = defaultdict(int)
+    merchants: dict[str, int] = defaultdict(int)
+    count = 0
+    for item in state["transactions"]:
+        if item["currency"] != currency or item["category"] in ("Income", "Transfers"):
+            continue
+        cents = item["amount_cents"]
+        categories[item["category"]] += cents
+        months[item["date"][:7]] += cents
+        merchants[item["normalized_merchant"]] += cents
+        count += 1
     return {
         "currency": currency,
-        "net_spending": money(total),
+        "net_spending": money(sum(categories.values())),
         "transaction_count": count,
         "by_category": {key: money(value) for key, value in sorted(categories.items())},
         "by_month": {key: money(value) for key, value in sorted(months.items())},
         "top_merchants": [
             {"merchant": key, "net_spending": money(value)}
-            for key, value in sorted(merchants.items(), key=lambda item: (-item[1], item[0]))[:10]
+            for key, value in sorted(merchants.items(), key=lambda pair: (-pair[1], pair[0]))[:10]
         ],
     }

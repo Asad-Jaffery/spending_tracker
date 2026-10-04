@@ -9,10 +9,10 @@ from spend_tracker.parsing import CsvError, parse_amount, parse_csv
 @pytest.mark.parametrize(
     ("description", "expected"),
     [
-        ("COSTCO WHSE #1029", "costco"),
+        ("COSTCO WHSE #1029", "costco whse"),
         ("COSTCO 00129", "costco"),
-        ("COSTCO WHOLESALE", "costco"),
-        ("SPOTIFY USA 1234", "spotify"),
+        ("COSTCO WHOLESALE", "costco wholesale"),
+        ("SPOTIFY USA 1234", "spotify usa"),
         ("SQ *BLUE BOTTLE COFFEE 0421", "blue bottle coffee"),
         ("7-ELEVEN #321", "7 eleven"),
         ("STUDIO 54", "studio 54"),

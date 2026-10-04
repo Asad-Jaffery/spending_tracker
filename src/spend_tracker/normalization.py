@@ -1,13 +1,6 @@
 import re
 import unicodedata
 
-# Deliberately narrow aliases. Do not strip arbitrary city names or embedded digits.
-ALIASES = {
-    "costco whse": "costco",
-    "costco wholesale": "costco",
-    "spotify usa": "spotify",
-}
-
 
 def normalize_merchant(description: str) -> str:
     value = unicodedata.normalize("NFKC", description).casefold().strip()
@@ -20,4 +13,4 @@ def normalize_merchant(description: str) -> str:
         raise ValueError("Description does not contain a merchant name")
     if len(value) > 500:
         raise ValueError("Normalized merchant name exceeds 500 characters")
-    return ALIASES.get(value, value)
+    return value

@@ -1,6 +1,9 @@
 # Project Spec
 
-This is the intended project design. The existing prototype may differ from it.
+This is the intended project design. The current MVP uses a local JSON store and
+synthetic JSON transactions while Supabase/Postgres remains future work. See the
+[README](../README.md) for what is runnable now. Jev is integrated in code but
+requires your API key for a live call.
 For the component layout and data flow, see the [project architecture](architecture.md).
 
 ## Goal
@@ -26,7 +29,7 @@ Merchant normalization
  ↓
 Classification engine
  ↓
-Supabase Postgres
+Local JSON store (MVP) → Supabase Postgres (later)
  ↓
 Analytics
 ```
@@ -73,21 +76,20 @@ For example:
 
 ```text
 COSTCO WHSE #1029
-COSTCO 00129
-COSTCO WHOLESALE
+COSTCO WHSE #928
 ```
 
-should ideally resolve to:
+both resolve to:
 
 ```text
-costco
+costco whse
 ```
 
 The transaction should preserve both values:
 
 ```text
 raw_description = "COSTCO WHSE #1029"
-normalized_merchant = "costco"
+normalized_merchant = "costco whse"
 ```
 
 Normalization may initially include:
@@ -95,9 +97,11 @@ Normalization may initially include:
 - lowercasing
 - removing store numbers
 - removing unnecessary punctuation
-- stripping location-specific information
 - removing known transaction prefixes
 - normalizing whitespace
+
+The MVP does not use hardcoded merchant aliases. Descriptions with different
+wording, such as `COSTCO WHSE` and `COSTCO WHOLESALE`, remain separate keys.
 
 The normalized merchant is what the classification engine uses.
 
@@ -154,8 +158,8 @@ Jev response does not create a merchant mapping.
 The database maintains a mapping like:
 
 ```text
-costco        → Shopping
-spotify       → Entertainment
+costco whse   → Shopping
+spotify usa   → Entertainment
 chipotle      → Dining
 shell         → Transportation
 ```
@@ -169,7 +173,7 @@ SPOTIFY USA 1234
 normalization produces:
 
 ```text
-spotify
+spotify usa
 ```
 
 The classification engine queries the existing merchant mapping.
@@ -572,7 +576,7 @@ COSTCO WHSE #1029
 COSTCO WHSE #928
 ```
 
-should almost certainly both become `costco`.
+both become `costco whse` using the current general cleanup rules.
 
 But aggressive normalization can accidentally merge unrelated merchants.
 

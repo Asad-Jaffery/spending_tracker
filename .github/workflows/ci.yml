@@ -1,4 +1,4 @@
-name: Backend checks
+name: Checks
 
 on:
   push:
@@ -7,22 +7,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: spend_tracker
-          POSTGRES_PASSWORD: test_only_password
-          POSTGRES_DB: spend_tracker_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U spend_tracker -d spend_tracker_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      TEST_DATABASE_URL: postgresql+psycopg://spend_tracker:test_only_password@localhost:5432/spend_tracker_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

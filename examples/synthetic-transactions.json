@@ -1,0 +1,8 @@
+[
+  {"date": "2026-09-01", "raw_description": "COSTCO WHSE #1029", "amount": "142.18", "source_transaction_id": "demo-001"},
+  {"date": "2026-09-02", "raw_description": "SPOTIFY USA 1234", "amount": "11.99", "source_transaction_id": "demo-002"},
+  {"date": "2026-09-03", "raw_description": "SQ *BLUE BOTTLE COFFEE 0421", "amount": "6.50", "source_transaction_id": "demo-003"},
+  {"date": "2026-09-04", "raw_description": "COSTCO WHOLESALE", "amount": "23.40", "source_transaction_id": "demo-004"},
+  {"date": "2026-09-05", "raw_description": "TST *CHIPOTLE 1122", "amount": "14.75", "source_transaction_id": "demo-005"},
+  {"date": "2026-09-06", "raw_description": "BLUE BOTTLE COFFEE 0421", "amount": "5.25", "source_transaction_id": "demo-006"}
+]
