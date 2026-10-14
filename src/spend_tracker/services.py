@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from spend_tracker.classifiers import MerchantClassifier, UnconfiguredJevClassifier
+from spend_tracker.classifiers import JevError, MerchantClassifier, UnconfiguredJevClassifier
 from spend_tracker.domain import Category, ClassificationSource
 from spend_tracker.parsing import ParsedInput
 
@@ -48,6 +48,8 @@ def import_transactions(
         "rows_failed": len(parsed.errors),
         "jev_attempts": 0,
         "jev_failures": 0,
+        "jev_skipped_no_key": 0,
+        "jev_errors": [],
         "errors": parsed.errors,
         "created_at": timestamp(),
     }
@@ -82,7 +84,11 @@ def import_transactions(
             needs_review = True
             if merchant not in attempted:
                 attempted.add(merchant)
-                if not isinstance(classifier, UnconfiguredJevClassifier):
+                if isinstance(classifier, UnconfiguredJevClassifier):
+                    run["jev_skipped_no_key"] += 1
+                if not isinstance(classifier, UnconfiguredJevClassifier) and getattr(
+                    classifier, "counts_as_jev", True
+                ):
                     run["jev_attempts"] += 1
                 try:
                     prediction = classifier.classify(merchant, tuple(Category))
@@ -99,7 +105,9 @@ def import_transactions(
                             ):
                                 confidence = None
                         category = predicted_category
-                        classification_source = ClassificationSource.JEV
+                        classification_source = getattr(
+                            classifier, "source", ClassificationSource.JEV
+                        )
                         needs_review = False
                         now = timestamp()
                         mappings[merchant] = {
@@ -107,14 +115,19 @@ def import_transactions(
                             "display_name": merchant.title(),
                             "category": category.value,
                             "confidence": confidence,
-                            "source": ClassificationSource.JEV.value,
+                            "source": classification_source.value,
                             "created_at": now,
                             "updated_at": now,
                         }
-                    elif not isinstance(classifier, UnconfiguredJevClassifier):
+                    elif not isinstance(classifier, UnconfiguredJevClassifier) and getattr(
+                        classifier, "counts_as_jev", True
+                    ):
                         run["jev_failures"] += 1
                 except Exception as exc:
-                    run["jev_failures"] += 1
+                    if getattr(classifier, "counts_as_jev", True):
+                        run["jev_failures"] += 1
+                    if isinstance(exc, JevError) and str(exc) not in run["jev_errors"]:
+                        run["jev_errors"].append(str(exc))
                     logger.warning("Classifier failed (%s); using Other", type(exc).__name__)
         state["transactions"].append(
             {
@@ -133,6 +146,7 @@ def import_transactions(
                 "classification_source": classification_source.value,
                 "needs_review": needs_review,
                 "possible_duplicate": possible_duplicate,
+                "excluded_from_spending": False,
                 "created_at": timestamp(),
             }
         )
@@ -142,6 +156,67 @@ def import_transactions(
         run["possible_duplicates"] += int(possible_duplicate)
     state["import_runs"].append(run)
     return run
+
+
+def retry_unclassified(state: dict, classifier: MerchantClassifier) -> dict:
+    """Classify existing non-demo review rows after Jev becomes available."""
+    if isinstance(classifier, UnconfiguredJevClassifier):
+        raise ValueError("Set JEVMODEL_API_KEY in .env or your terminal before retrying")
+    pending: dict[str, list[dict]] = defaultdict(list)
+    for item in state["transactions"]:
+        if (
+            item["needs_review"]
+            and item["classification_source"] == ClassificationSource.UNCLASSIFIED.value
+            and not item["source"].startswith("synthetic-")
+        ):
+            pending[item["normalized_merchant"]].append(item)
+    report = {
+        "merchants_attempted": 0,
+        "jev_failures": 0,
+        "jev_errors": [],
+        "transactions_updated": 0,
+    }
+    mappings = state["merchant_mappings"]
+    for merchant, rows in pending.items():
+        mapping = mappings.get(merchant)
+        created_mapping = mapping is None
+        if mapping is None:
+            report["merchants_attempted"] += 1
+            try:
+                prediction = classifier.classify(merchant, tuple(Category))
+                if prediction is None:
+                    raise ValueError("Jev returned no category")
+                category = Category(prediction.category)
+            except Exception as exc:
+                report["jev_failures"] += 1
+                if isinstance(exc, JevError) and str(exc) not in report["jev_errors"]:
+                    report["jev_errors"].append(str(exc))
+                logger.warning("Classifier retry failed (%s)", type(exc).__name__)
+                continue
+            now = timestamp()
+            mapping = {
+                "normalized_merchant": merchant,
+                "display_name": merchant.title(),
+                "category": category.value,
+                "confidence": prediction.confidence,
+                "source": ClassificationSource.JEV.value,
+                "created_at": now,
+                "updated_at": now,
+            }
+            mappings[merchant] = mapping
+        for item in rows:
+            item["category"] = mapping["category"]
+            item["classification_source"] = (
+                ClassificationSource.JEV.value
+                if created_mapping
+                else ClassificationSource.MERCHANT_MAPPING.value
+            )
+            item["needs_review"] = False
+            report["transactions_updated"] += 1
+    report["transactions_remaining"] = sum(
+        len(rows) for merchant, rows in pending.items() if any(row["needs_review"] for row in rows)
+    )
+    return report
 
 
 def correct_category(
@@ -176,6 +251,7 @@ def correct_category(
         item["category"] = category.value
         item["classification_source"] = ClassificationSource.MANUAL.value
         item["needs_review"] = False
+        item["excluded_from_spending"] = False
     return len(targets)
 
 
@@ -189,7 +265,7 @@ def spending_summary(state: dict, *, currency: str = "USD") -> dict:
     merchants: dict[str, int] = defaultdict(int)
     count = 0
     for item in state["transactions"]:
-        if item["currency"] != currency or item["category"] in ("Income", "Transfers"):
+        if item["currency"] != currency or item.get("excluded_from_spending", False):
             continue
         cents = item["amount_cents"]
         categories[item["category"]] += cents

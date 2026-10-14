@@ -1,9 +1,39 @@
-"""Local JSON persistence. Replace this boundary when adding Supabase/Postgres."""
+"""Local JSON persistence and compatibility for older saved categories."""
 
 import json
 import os
 import tempfile
 from pathlib import Path
+
+from spend_tracker.domain import Category, ClassificationSource
+
+RENAMED_CATEGORIES = {
+    "Dining": Category.FOOD_COFFEE.value,
+    "Health": Category.HEALTH_PERSONAL_WELLNESS.value,
+}
+REMOVED_CATEGORIES = {"Housing", "Utilities", "Income", "Transfers"}
+LEGACY_NON_SPENDING = {"Income", "Transfers"}
+
+
+def migrate_categories(state: dict) -> dict:
+    """Keep older saved data usable after the category list changes."""
+    for item in state["transactions"]:
+        old = item["category"]
+        if old in RENAMED_CATEGORIES:
+            item["category"] = RENAMED_CATEGORIES[old]
+        elif old in REMOVED_CATEGORIES:
+            item["category"] = Category.OTHER.value
+            item["classification_source"] = ClassificationSource.UNCLASSIFIED.value
+            item["needs_review"] = True
+            if old in LEGACY_NON_SPENDING:
+                item["excluded_from_spending"] = True
+    for merchant, mapping in list(state["merchant_mappings"].items()):
+        old = mapping["category"]
+        if old in RENAMED_CATEGORIES:
+            mapping["category"] = RENAMED_CATEGORIES[old]
+        elif old in REMOVED_CATEGORIES:
+            del state["merchant_mappings"][merchant]
+    return state
 
 
 def empty_state() -> dict:
@@ -29,7 +59,7 @@ class JsonStore:
             or not isinstance(data.get("import_runs"), list)
         ):
             raise ValueError("Unsupported or invalid data store")
-        return data
+        return migrate_categories(data)
 
     def save(self, state: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

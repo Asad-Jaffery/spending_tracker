@@ -13,16 +13,14 @@ from spend_tracker.domain import Category, Prediction
 JEV_URL = "https://jevmodel.org/v1/systemone"
 CATEGORY_CRITERIA = {
     Category.GROCERIES: "Supermarkets, food markets, and household groceries",
-    Category.DINING: "Restaurants, cafes, coffee shops, and prepared meals",
+    Category.FOOD_COFFEE: "Restaurants, cafes, coffee shops, and prepared meals",
     Category.TRANSPORTATION: "Fuel, transit, rideshare, parking, and vehicle costs",
-    Category.HOUSING: "Rent, mortgage, and housing payments",
-    Category.UTILITIES: "Electricity, water, gas, internet, and phone service",
     Category.SHOPPING: "Retail goods and online purchases",
     Category.ENTERTAINMENT: "Streaming, games, movies, events, and recreation",
     Category.TRAVEL: "Flights, hotels, and travel bookings",
-    Category.HEALTH: "Medical, dental, pharmacy, and fitness costs",
-    Category.INCOME: "Salary, wages, refunds, and other incoming money",
-    Category.TRANSFERS: "Transfers between accounts or payments of card balances",
+    Category.HEALTH_PERSONAL_WELLNESS: (
+        "Medical, dental, pharmacy, fitness, and personal wellness costs"
+    ),
     Category.OTHER: "Anything that does not fit another category",
 }
 

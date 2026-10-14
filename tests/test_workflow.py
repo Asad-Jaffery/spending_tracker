@@ -2,11 +2,19 @@ import json
 import urllib.error
 from io import BytesIO
 
+import pytest
+
 from spend_tracker.__main__ import main
 from spend_tracker.classifiers import JevClassifier, JevError, UnconfiguredJevClassifier
+from spend_tracker.config import jev_api_key
 from spend_tracker.domain import Category, Prediction
 from spend_tracker.parsing import parse_csv, parse_json
-from spend_tracker.services import correct_category, import_transactions, spending_summary
+from spend_tracker.services import (
+    correct_category,
+    import_transactions,
+    retry_unclassified,
+    spending_summary,
+)
 from spend_tracker.storage import JsonStore, empty_state
 
 
@@ -96,6 +104,66 @@ def test_failure_and_explicit_other_are_different():
     )
     assert state["merchant_mappings"]["unknown shop"]["category"] == "Other"
     assert state["transactions"][1]["needs_review"] is False
+
+
+def test_retry_classifies_existing_review_rows_without_reimporting():
+    state = empty_state()
+    content, parsed = sample()
+    first = import_transactions(
+        state,
+        parsed,
+        filename="first.csv",
+        content=content,
+        source="checking",
+        currency="USD",
+        classifier=UnconfiguredJevClassifier(),
+    )
+    assert first["jev_skipped_no_key"] == 1
+    assert first["jev_attempts"] == 0
+    assert all(item["needs_review"] for item in state["transactions"])
+    classifier = FakeClassifier(Prediction(Category.GROCERIES, 0.7))
+    result = retry_unclassified(state, classifier)
+    assert result["merchants_attempted"] == 1
+    assert result["transactions_updated"] == 2
+    assert classifier.calls == ["costco whse"]
+    assert all(item["category"] == "Groceries" for item in state["transactions"])
+    assert all(not item["needs_review"] for item in state["transactions"])
+    assert state["merchant_mappings"]["costco whse"]["category"] == "Groceries"
+    assert retry_unclassified(state, classifier)["transactions_updated"] == 0
+
+
+def test_retry_preserves_manual_corrections_and_failed_rows():
+    state = empty_state()
+    content = b"date,description,amount\n2026-09-01,New Cafe,4.00\n2026-09-02,New Cafe,5.00\n"
+    import_transactions(
+        state,
+        parse_csv(content),
+        filename="first.csv",
+        content=content,
+        source="checking",
+        currency="USD",
+        classifier=UnconfiguredJevClassifier(),
+    )
+    correct_category(state, state["transactions"][0]["id"], Category.SHOPPING)
+    failure = retry_unclassified(state, FakeClassifier(JevError("Jev returned HTTP 401")))
+    assert failure["jev_failures"] == 1
+    assert failure["jev_errors"] == ["Jev returned HTTP 401"]
+    assert state["merchant_mappings"] == {}
+    success = retry_unclassified(state, FakeClassifier(Prediction(Category.FOOD_COFFEE)))
+    assert success["transactions_updated"] == 1
+    assert [item["category"] for item in state["transactions"]] == [
+        "Shopping",
+        "Food + coffee",
+    ]
+
+
+def test_jev_key_can_be_read_from_ignored_local_env_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("JEVMODEL_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("# local secret\nJEVMODEL_API_KEY='sk-local'\n")
+    assert jev_api_key() == "sk-local"
+    monkeypatch.setenv("JEVMODEL_API_KEY", "sk-shell")
+    assert jev_api_key() == "sk-shell"
 
 
 def test_corrections_and_future_mapping():
@@ -234,7 +302,11 @@ def test_jev_request_and_response(monkeypatch):
             json.dumps(
                 {
                     "answers": {
-                        "category": {"type": "choice", "choice": "Dining", "confidence": 0.02}
+                        "category": {
+                            "type": "choice",
+                            "choice": "Food + coffee",
+                            "confidence": 0.02,
+                        }
                     }
                 }
             ).encode()
@@ -242,13 +314,23 @@ def test_jev_request_and_response(monkeypatch):
 
     monkeypatch.setattr("spend_tracker.classifiers.urllib.request.urlopen", open_request)
     result = JevClassifier("sk-test").classify("coffee shop", tuple(Category))
-    assert result == Prediction(Category.DINING, 0.02)
+    assert result == Prediction(Category.FOOD_COFFEE, 0.02)
     assert captured["url"] == "https://jevmodel.org/v1/systemone"
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
     assert captured["body"]["questions"]["category"]["type"] == "choice"
     assert set(captured["body"]["questions"]["category"]["criteria"]) == {
         category.value for category in Category
     }
+    assert [category.value for category in Category] == [
+        "Groceries",
+        "Food + coffee",
+        "Transportation",
+        "Shopping",
+        "Entertainment",
+        "Travel",
+        "Health + personal wellness",
+        "Other",
+    ]
 
 
 def test_jev_retry_reuses_idempotency_key(monkeypatch):
@@ -277,7 +359,7 @@ def test_bad_confidence_does_not_discard_valid_jev_category(monkeypatch):
                     "answers": {
                         "category": {
                             "type": "choice",
-                            "choice": "Dining",
+                            "choice": "Food + coffee",
                             "confidence": "not-a-number",
                         }
                     }
@@ -287,4 +369,15 @@ def test_bad_confidence_does_not_discard_valid_jev_category(monkeypatch):
 
     monkeypatch.setattr("spend_tracker.classifiers.urllib.request.urlopen", open_request)
     prediction = JevClassifier("sk-test").classify("cafe", tuple(Category))
-    assert prediction == Prediction(Category.DINING, None)
+    assert prediction == Prediction(Category.FOOD_COFFEE, None)
+
+
+def test_retired_jev_category_is_rejected(monkeypatch):
+    def open_request(request, timeout):
+        return BytesIO(
+            json.dumps({"answers": {"category": {"type": "choice", "choice": "Dining"}}}).encode()
+        )
+
+    monkeypatch.setattr("spend_tracker.classifiers.urllib.request.urlopen", open_request)
+    with pytest.raises(JevError, match="invalid classification"):
+        JevClassifier("sk-test").classify("cafe", tuple(Category))

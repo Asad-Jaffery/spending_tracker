@@ -5,10 +5,20 @@ import sys
 from pathlib import Path
 
 from spend_tracker.classifiers import JevClassifier, JevError, UnconfiguredJevClassifier
+from spend_tracker.config import jev_api_key
 from spend_tracker.domain import Category
 from spend_tracker.parsing import InputError, parse_csv, parse_json
-from spend_tracker.services import correct_category, import_transactions, money, spending_summary
+from spend_tracker.postgres import PostgresStore
+from spend_tracker.services import (
+    correct_category,
+    import_transactions,
+    money,
+    retry_unclassified,
+    spending_summary,
+)
 from spend_tracker.storage import JsonStore
+from spend_tracker.synthetic import seed_june, seed_may
+from spend_tracker.webapp import serve
 
 
 def parser() -> argparse.ArgumentParser:
@@ -18,6 +28,11 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(os.getenv("SPEND_TRACKER_DATA", "data/spend-tracker.json")),
         help="Local JSON data file (default: data/spend-tracker.json)",
+    )
+    command.add_argument(
+        "--database-url",
+        default=os.getenv("SPEND_TRACKER_DATABASE_URL"),
+        help="Optional PostgreSQL URL; otherwise use the local JSON file",
     )
     subcommands = command.add_subparsers(dest="command", required=True)
     importing = subcommands.add_parser("import", help="Import a CSV or synthetic JSON file")
@@ -45,6 +60,13 @@ def parser() -> argparse.ArgumentParser:
     summary.add_argument("--currency", default="USD")
     jev = subcommands.add_parser("jev-test", help="Make one live Jev call without saving anything")
     jev.add_argument("merchant", help="A merchant name, such as 'blue bottle coffee'")
+    subcommands.add_parser(
+        "retry-classification", help="Classify previously imported rows needing review"
+    )
+    subcommands.add_parser("demo", help="Import the synthetic May and June 2026 datasets")
+    server = subcommands.add_parser("serve", help="Run the local dashboard")
+    server.add_argument("--port", type=int, default=8765)
+    server.add_argument("--no-demo", action="store_true", help="Start with an empty dashboard")
     return command
 
 
@@ -56,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "jev-test":
-            key = os.getenv("JEVMODEL_API_KEY")
+            key = jev_api_key()
             if not key:
                 raise ValueError("Set JEVMODEL_API_KEY before running jev-test")
             prediction = JevClassifier(key).classify(args.merchant, tuple(Category))
@@ -68,9 +90,17 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             return 0
-        store = JsonStore(args.data)
+        store = PostgresStore(args.database_url) if args.database_url else JsonStore(args.data)
+        if args.command == "serve":
+            serve(store, port=args.port, seed_demo=not args.no_demo)
+            return 0
         state = store.load()
-        if args.command == "import":
+        if args.command == "demo":
+            june = seed_june(state)
+            may = seed_may(state)
+            store.save(state)
+            print_json({"june": june, "may": may})
+        elif args.command == "import":
             content = args.path.read_bytes()
             if args.path.suffix.lower() == ".csv":
                 parsed = parse_csv(
@@ -80,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
                 parsed = parse_json(content)
             else:
                 raise ValueError("Input file must end in .csv or .json")
-            key = os.getenv("JEVMODEL_API_KEY")
+            key = jev_api_key()
             classifier = JevClassifier(key) if key else UnconfiguredJevClassifier()
             run = import_transactions(
                 state,
@@ -93,6 +123,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             store.save(state)
             print_json(run)
+        elif args.command == "retry-classification":
+            key = jev_api_key()
+            if not key:
+                raise ValueError("Set JEVMODEL_API_KEY in .env or your terminal before retrying")
+            report = retry_unclassified(state, JevClassifier(key))
+            store.save(state)
+            print_json(report)
         elif args.command == "transactions":
             print_json(
                 [
@@ -123,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "summary":
             print_json(spending_summary(state, currency=args.currency))
         return 0
-    except (OSError, ValueError, InputError, JevError) as exc:
+    except (OSError, ValueError, InputError, JevError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

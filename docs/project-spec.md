@@ -1,18 +1,17 @@
 # Project Spec
 
-This is the intended project design. The current MVP uses a local JSON store and
-synthetic JSON transactions while Supabase/Postgres remains future work. See the
-[README](../README.md) for what is runnable now. Jev is integrated in code but
-requires your API key for a live call.
+This is the intended project design. The working prototype includes a local
+dashboard, synthetic June transactions, a default JSON store, and an optional
+PostgreSQL connector. See the [README](../README.md) for how to run it. Jev is
+integrated in code but requires your API key for a live call.
 For the component layout and data flow, see the [project architecture](architecture.md).
 
 ## Goal
 
-Spend Tracker ingests transaction CSV files, normalizes merchant names, classifies transactions into spending categories, stores the results in Postgres, and supports corrections that improve future classification behavior.
+Spend Tracker ingests transaction CSV files, normalizes merchant names, classifies transactions into spending categories, stores the results in local JSON or PostgreSQL, and supports corrections that improve future classification behavior.
 
-The project is intentionally scoped around a local import pipeline and the
-classification system. A Python command reads CSV files directly; no upload
-endpoint or running web server is required.
+The project centers on a local import pipeline and the classification system.
+A Python command or the local dashboard can import CSV files.
 
 Core flow:
 
@@ -29,20 +28,21 @@ Merchant normalization
  ↓
 Classification engine
  ↓
-Local JSON store (MVP) → Supabase Postgres (later)
- ↓
-Analytics
+Local JSON store (default) or PostgreSQL (configured)
+       ↓
+Dashboard and analytics
 ```
 
 ## Tech Stack
 
 - Python
-- Supabase-hosted PostgreSQL
+- Local JSON or PostgreSQL (including Supabase-hosted Postgres)
 - Jev for merchant classification
 - CSV transaction files as input
+- Local browser dashboard
 
-No web server, Plaid, PDF ingestion, multi-user system, frontend, or
-complicated authentication is needed for the initial version.
+No Plaid, PDF ingestion, multi-user system, or complicated authentication is
+needed for this prototype.
 
 ---
 
@@ -160,7 +160,7 @@ The database maintains a mapping like:
 ```text
 costco whse   → Shopping
 spotify usa   → Entertainment
-chipotle      → Dining
+chipotle      → Food + coffee
 shell         → Transportation
 ```
 
@@ -217,16 +217,12 @@ The import pipeline asks Jev to choose from a constrained category set such as:
 
 ```text
 Groceries
-Dining
+Food + coffee
 Transportation
-Housing
-Utilities
 Shopping
 Entertainment
 Travel
-Health
-Income
-Transfers
+Health + personal wellness
 Other
 ```
 
@@ -234,7 +230,7 @@ Jev might return (the confidence field is optional):
 
 ```json
 {
-  "category": "Dining",
+  "category": "Food + coffee",
   "confidence": 0.96
 }
 ```
@@ -242,7 +238,7 @@ Jev might return (the confidence field is optional):
 The system then stores:
 
 ```text
-blue bottle coffee → Dining
+blue bottle coffee → Food + coffee
 ```
 
 The next Blue Bottle transaction uses the stored mapping rather than calling Jev again.
@@ -408,7 +404,9 @@ Future imports use new category
 
 # Database
 
-The initial system only needs a few important tables.
+The optional PostgreSQL store uses three tables, one for each collection below.
+For the single-user prototype, their records are stored as JSONB payloads; the
+listed fields describe the data inside each record.
 
 ## transactions
 

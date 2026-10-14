@@ -1,0 +1,331 @@
+[
+  {
+    "date": "2026-05-01",
+    "raw_description": "MAPLE APARTMENTS RENT",
+    "amount": "1450.00",
+    "source_transaction_id": "may-001",
+    "synthetic_category": null
+  },
+  {
+    "date": "2026-05-02",
+    "raw_description": "SEATTLE CITY LIGHT",
+    "amount": "91.05",
+    "source_transaction_id": "may-003",
+    "synthetic_category": null
+  },
+  {
+    "date": "2026-05-02",
+    "raw_description": "SAFEWAY #1834",
+    "amount": "49.97",
+    "source_transaction_id": "may-020",
+    "synthetic_category": "Groceries"
+  },
+  {
+    "date": "2026-05-02",
+    "raw_description": "TST *CHIPOTLE 1122",
+    "amount": "15.93",
+    "source_transaction_id": "may-041",
+    "synthetic_category": "Food + coffee"
+  },
+  {
+    "date": "2026-05-03",
+    "raw_description": "COMCAST INTERNET",
+    "amount": "72.09",
+    "source_transaction_id": "may-004",
+    "synthetic_category": null
+  },
+  {
+    "date": "2026-05-03",
+    "raw_description": "SQ *BLUE BOTTLE COFFEE 0421",
+    "amount": "6.75",
+    "source_transaction_id": "may-033",
+    "synthetic_category": "Food + coffee"
+  },
+  {
+    "date": "2026-05-04",
+    "raw_description": "T-MOBILE AUTOPAY",
+    "amount": "56.65",
+    "source_transaction_id": "may-005",
+    "synthetic_category": null
+  },
+  {
+    "date": "2026-05-04",
+    "raw_description": "COSTCO WHSE #1029",
+    "amount": "90.76",
+    "source_transaction_id": "may-025",
+    "synthetic_category": "Groceries"
+  },
+  {
+    "date": "2026-05-04",
+    "raw_description": "METRO TRANSIT",
+    "amount": "3.81",
+    "source_transaction_id": "may-048",
+    "synthetic_category": "Transportation"
+  },
+  {
+    "date": "2026-05-05",
+    "raw_description": "SPOTIFY USA 1234",
+    "amount": "11.15",
+    "source_transaction_id": "may-006",
+    "synthetic_category": "Entertainment"
+  },
+  {
+    "date": "2026-05-05",
+    "raw_description": "TRADER JOE'S #104",
+    "amount": "35.13",
+    "source_transaction_id": "may-029",
+    "synthetic_category": "Groceries"
+  },
+  {
+    "date": "2026-05-06",
+    "raw_description": "NETFLIX.COM",
+    "amount": "14.41",
+    "source_transaction_id": "may-007",
+    "synthetic_category": "Entertainment"
+  },
+  {
+    "date": "2026-05-06",
+    "raw_description": "SQ *BLUE BOTTLE COFFEE 0421",
+    "amount": "6.21",
+    "source_transaction_id": "may-034",
+    "synthetic_category": "Food + coffee"
+  },
+  {
+    "date": "2026-05-06",
+    "raw_description": "HARBOR POP-UP 442",
+    "amount": "16.43",
+    "source_transaction_id": "may-057",
+    "synthetic_category": null
+  },
+  {
+    "date": "2026-05-07",
+    "raw_description": "PLANET FITNESS",
+    "amount": "21.24",
+    "source_transaction_id": "may-008",
+    "synthetic_category": "Health + personal wellness"
+  },
+  {
+    "date": "2026-05-07",
+    "raw_description": "THAI GARDEN",
+    "amount": "34.99",
+    "source_transaction_id": "may-045",
+    "synthetic_category": "Food + coffee"
+  },
+  {
+    "date": "2026-05-08",
+    "raw_description": "SAFEWAY #1834",
+    "amount": "57.21",
+    "source_transaction_id": "may-021",
+    "synthetic_category": "Groceries"
+  },
+  {
+    "date": "2026-05-08",
+    "raw_description": "METRO TRANSIT",
+    "amount": "3.81",
+    "source_transaction_id": "may-049",
+    "synthetic_category": "Transportation"
+  },
+  {
+    "date": "2026-05-09",
+    "raw_description": "SHELL GAS #203",
+    "amount": "61.24",
+    "source_transaction_id": "may-009",
+    "synthetic_category": "Transportation"
+  },
+  {
+    "date": "2026-05-09",
+    "raw_description": "TST *CHIPOTLE 1122",
+    "amount": "14.26",
+    "source_transaction_id": "may-042",
+    "synthetic_category": "Food + coffee"
+  },
+  {
+    "date": "2026-05-10",
+    "raw_description": "AMAZON MKTPLACE 8832",
+    "amount": "111.85",
+    "source_transaction_id": "may-010",
+    "synthetic_category": "Shopping"
+  },
+  {
+    "date": "2026-05-10",
+    "raw_description": "SQ *BLUE BOTTLE COFFEE 0421",
+    "amount": "7.67",
+    "source_transaction_id": "may-035",
+    "synthetic_category": "Food + coffee"
+  },
+  {
+    "date": "2026-05-11",
+    "raw_description": "REI CO-OP",
+    "amount": "99.67",
+    "source_transaction_id": "may-011",
+    "synthetic_category": "Shopping"
+  },
+  {
+    "date": "2026-05-11",
+    "raw_description": "UBER TRIP 93823",
+    "amount": "23.37",
+    "source_transaction_id": "may-054",
+    "synthetic_category": "Transportation"
+  },
+  {
+    "date": "2026-05-11",
+    "raw_description": "VEND 7742",
+    "amount": "8.01",
+    "source_transaction_id": "may-058",
+    "synthetic_category": null
+  },
+  {
+    "date": "2026-05-12",
+    "raw_description": "WALGREENS #4512",
+    "amount": "15.17",
+    "source_transaction_id": "may-012",
+    "synthetic_category": "Health + personal wellness"
+  },
+  {
+    "date": "2026-05-12",
+    "raw_description": "COSTCO WHSE #1029",
+    "amount": "77.56",
+    "source_transaction_id": "may-026",
+    "synthetic_category": "Groceries"
+  },
+  {
+    "date": "2026-05-12",
+    "raw_description": "METRO TRANSIT",
+    "amount": "3.81",
+    "source_transaction_id": "may-050",
+    "synthetic_category": "Transportation"
+  },
+  {
+    "date": "2026-05-13",
+    "raw_description": "AMC THEATRES",
+    "amount": "29.30",
+    "source_transaction_id": "may-013",
+    "synthetic_category": "Entertainment"
+  },
+  {
+    "date": "2026-05-13",
+    "raw_description": "TRADER JOE'S #104",
+    "amount": "39.25",
+    "source_transaction_id": "may-030",
+    "synthetic_category": "Groceries"
+  },
+  {
+    "date": "2026-05-14",
+    "raw_description": "SQ *BLUE BOTTLE COFFEE 0421",
+    "amount": "7.02",
+    "source_transaction_id": "may-036",
+    "synthetic_category": "Food + coffee"
+  },
+  {
+    "date": "2026-05-15",
+    "raw_description": "DELTA AIR LINES",
+    "amount": "253.80",
+    "source_transaction_id": "may-014",
+    "synthetic_category": "Travel"
+  },
+  {
+    "date": "2026-05-15",
+    "raw_description": "SAFEWAY #1834",
+    "amount": "65.37",
+    "source_transaction_id": "may-022",
+    "synthetic_category": "Groceries"
+  },
+  {
+    "date": "2026-05-16",
+    "raw_description": "METRO TRANSIT",
+    "amount": "3.81",
+    "source_transaction_id": "may-051",
+    "synthetic_category": "Transportation"
+  },
+  {
+    "date": "2026-05-16",
+    "raw_description": "PAYMENT TJS 882",
+    "amount": "24.66",
+    "source_transaction_id": "may-059",
+    "synthetic_category": null
+  },
+  {
+    "date": "2026-05-17",
+    "raw_description": "TARGET #1192",
+    "amount": "69.44",
+    "source_transaction_id": "may-015",
+    "synthetic_category": "Shopping"
+  },
+  {
+    "date": "2026-05-17",
+    "raw_description": "TST *CHIPOTLE 1122",
+    "amount": "16.90",
+    "source_transaction_id": "may-043",
+    "synthetic_category": "Food + coffee"
+  },
+  {
+    "date": "2026-05-18",
+    "raw_description": "MARriott DOWNTOWN",
+    "amount": "162.00",
+    "source_transaction_id": "may-016",
+    "synthetic_category": "Travel"
+  },
+  {
+    "date": "2026-05-18",
+    "raw_description": "SQ *BLUE BOTTLE COFFEE 0421",
+    "amount": "6.43",
+    "source_transaction_id": "may-037",
+    "synthetic_category": "Food + coffee"
+  },
+  {
+    "date": "2026-05-19",
+    "raw_description": "THAI GARDEN",
+    "amount": "30.78",
+    "source_transaction_id": "may-046",
+    "synthetic_category": "Food + coffee"
+  },
+  {
+    "date": "2026-05-20",
+    "raw_description": "LOCAL BOOKSTORE",
+    "amount": "43.38",
+    "source_transaction_id": "may-017",
+    "synthetic_category": "Shopping"
+  },
+  {
+    "date": "2026-05-20",
+    "raw_description": "COSTCO WHSE #1029",
+    "amount": "99.59",
+    "source_transaction_id": "may-027",
+    "synthetic_category": "Groceries"
+  },
+  {
+    "date": "2026-05-21",
+    "raw_description": "TRADER JOE'S #104",
+    "amount": "43.56",
+    "source_transaction_id": "may-031",
+    "synthetic_category": "Groceries"
+  },
+  {
+    "date": "2026-05-21",
+    "raw_description": "UBER TRIP 93823",
+    "amount": "28.13",
+    "source_transaction_id": "may-055",
+    "synthetic_category": "Transportation"
+  },
+  {
+    "date": "2026-05-22",
+    "raw_description": "SQ *BLUE BOTTLE COFFEE 0421",
+    "amount": "7.29",
+    "source_transaction_id": "may-038",
+    "synthetic_category": "Food + coffee"
+  },
+  {
+    "date": "2026-05-23",
+    "raw_description": "METRO TRANSIT",
+    "amount": "3.81",
+    "source_transaction_id": "may-052",
+    "synthetic_category": "Transportation"
+  },
+  {
+    "date": "2026-05-25",
+    "raw_description": "AMAZON MKTPLACE 9950",
+    "amount": "56.44",
+    "source_transaction_id": "may-018",
+    "synthetic_category": "Shopping"
+  }
+]

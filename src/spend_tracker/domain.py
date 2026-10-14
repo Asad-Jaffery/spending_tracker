@@ -6,16 +6,12 @@ from enum import StrEnum
 
 class Category(StrEnum):
     GROCERIES = "Groceries"
-    DINING = "Dining"
+    FOOD_COFFEE = "Food + coffee"
     TRANSPORTATION = "Transportation"
-    HOUSING = "Housing"
-    UTILITIES = "Utilities"
     SHOPPING = "Shopping"
     ENTERTAINMENT = "Entertainment"
     TRAVEL = "Travel"
-    HEALTH = "Health"
-    INCOME = "Income"
-    TRANSFERS = "Transfers"
+    HEALTH_PERSONAL_WELLNESS = "Health + personal wellness"
     OTHER = "Other"
 
 
@@ -24,6 +20,7 @@ class ClassificationSource(StrEnum):
     JEV = "jev"
     MANUAL = "manual"
     UNCLASSIFIED = "unclassified"
+    SYNTHETIC = "synthetic"
 
 
 @dataclass(frozen=True)

@@ -4,19 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spend-tracker"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local transaction imports, merchant classification, and spending summaries"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1"]
 
 [project.scripts]
 spend-tracker = "spend_tracker.__main__:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "ruff>=0.9,<1"]
+dev = ["pytest>=8,<10", "ruff>=0.9,<1", "httpx>=0.28,<1"]
+postgres = ["psycopg[binary]>=3.2,<4"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+spend_tracker = ["demo/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
