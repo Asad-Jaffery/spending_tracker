@@ -26,20 +26,24 @@ uses June 2026 sample transactions for the monthly dashboard and six months of
 fake history (January–June 2026, 347 transactions) for the over-time view.
 The history includes changing category totals, a spring travel spike, and a
 shopping spike so the chart is useful to explore during a presentation.
-Transactions, merchants, and review also stay within the demo. Demo corrections stay in
+Transactions, merchants, and review also stay within the demo. Demo corrections and manual entries stay in
 memory and reset when the server restarts; they never update the saved financial
 data. Open `http://127.0.0.1:5174/?month=synthetic` to start directly in the demo.
 The selected month is kept in the URL so refreshing preserves that selection.
 
 - **Monthly view:** spending, transaction and merchant counts, review count, spending by week and category with Chart.js hover tooltips for exact amounts and category shares, a category-by-category comparison with the previous calendar month, top merchants, and review items. The month selector chooses which month to inspect. The comparison says when the previous month has no data.
 - **Over time:** all imported months in one view, with a line for each spending category, hover details for the nearest month, category visibility controls, all-time summary metrics, and a table of exact monthly amounts. Months without transactions appear as zero points so gaps in the timeline are visible. Transactions excluded from spending totals remain excluded here.
-- **Transactions:** category columns with counts and totals, plus the amount, date, classification source, and correction action for every transaction in the selected month.
+- **Transactions:** category columns with counts and totals, plus the normalized merchant as the main label, original statement text when it adds detail, amount, date, classification source, correction, and deletion actions for every transaction in the selected month. Drag a card into another category to change only that transaction; the saved merchant category stays unchanged. Use **Add transaction** to enter a single purchase or refund without a CSV.
 - **Merchants:** saved categories that new transactions will reuse.
 - **Review:** transactions assigned `Other` after a missing or failed classification.
 
 Select **Import CSV** to add a bank statement. The importer validates rows, normalizes merchants, ignores any CSV category label, and reports imports, duplicates, and rejected rows. Choose the source account and, if needed, the date format and sign convention. It first uses a column mapping previously saved for that account; otherwise it matches common header names: `date`/`transaction date`/`posting date`/`posted date`, `description`/`merchant`/`name`/`payee`/`raw description`, and `amount`/`transaction amount`; a transaction ID is optional. These defaults are common header names, not claims of support for specific banks. If your export uses different headers, expand **Custom column mapping** and enter the exact date, description, and amount column names from the file, plus an optional transaction ID column. A successful import saves the mapping for that account so later imports can omit it. A structural mismatch rejects the file and shows its available headers so you can correct the mapping and retry. Invalid individual rows are reported while valid rows still import; if no rows are valid, the file is rejected. Files with separate debit and credit columns need conversion to one amount column before import. A JSON import is also supported for synthetic/test data. Imported data persists across restarts.
 
+Select **Add transaction** in the sidebar or on the Transactions page to enter one date, merchant/description, dollar amount, category, and account name. Positive amounts are spending; negative amounts are refunds. The entry is stored as a manually classified transaction and appears in the selected month's transactions and analytics. It does not create an import run, call Jev, or alter a saved merchant mapping. A repeated entry is retained and flagged as a possible duplicate for review. Entries made while Synthetic is selected stay in the isolated demo state and reset on restart.
+
 Click **Correct** on a transaction, choose a category, then choose either **This transaction only** or **All from this merchant**. The first changes only the selected row. The second changes all existing rows for that merchant and saves its category for future imports.
+On the Transactions page, you can also drag a transaction card into a different category column. This makes a transaction-only correction. The **Correct** button remains available for merchant-wide changes and for keyboard or touch use.
+Use **Delete** on a transaction card to remove that one row after confirming. Its spending totals update immediately; merchant mappings and past import reports remain. Reimporting the source CSV can restore a deleted imported row.
 
 ### Credit-card import presets
 

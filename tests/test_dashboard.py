@@ -174,6 +174,179 @@ def test_possible_duplicate_can_be_excluded_and_restored(tmp_path, monkeypatch):
         ).status_code
         == 400
     )
+    original = next(
+        item
+        for item in state["transactions"]
+        if item["fingerprint"] == duplicate["fingerprint"] and item["id"] != duplicate["id"]
+    )
+    assert (
+        client.post(
+            "/api/duplicate-exclusion",
+            json={"transaction_id": duplicate["id"], "excluded": True},
+        ).status_code
+        == 200
+    )
+    assert client.delete(f"/api/transactions/{original['id']}").status_code == 200
+    remaining = next(
+        item
+        for item in client.get("/api/state?month=2026-09").json()["transactions"]
+        if item["id"] == duplicate["id"]
+    )
+    assert remaining["possible_duplicate"] is False
+    assert remaining["excluded_from_spending"] is False
+    assert total_spending() == 9000
+
+
+def test_delete_transaction_updates_analytics_and_allows_reimport(tmp_path, monkeypatch):
+    monkeypatch.setattr("spend_tracker.webapp.jev_api_key", lambda: None)
+    store = JsonStore(tmp_path / "state.json")
+    client = TestClient(create_app(store, seed_demo=False))
+    content = (
+        b"date,description,amount,transaction_id\n"
+        b"2026-09-01,Example shop,20.00,one\n"
+        b"2026-09-02,Example shop,30.00,two\n"
+    )
+    payload = {
+        "filename": "transactions.csv",
+        "content_base64": base64.b64encode(content).decode(),
+        "source": "checking",
+    }
+    assert client.post("/api/import", json=payload).json()["rows_imported"] == 2
+    rows = client.get("/api/state?month=2026-09").json()["transactions"]
+    assert (
+        client.post(
+            "/api/correct",
+            json={"transaction_id": rows[0]["id"], "category": "Groceries", "scope": "merchant"},
+        ).status_code
+        == 200
+    )
+
+    removed = client.delete(f"/api/transactions/{rows[0]['id']}")
+    assert removed.status_code == 200
+    assert removed.json() == {"transaction_id": rows[0]["id"], "deleted": True}
+    snapshot = client.get("/api/state?month=2026-09").json()
+    assert snapshot["dashboard"]["transaction_count"] == 1
+    assert snapshot["dashboard"]["total_spending_cents"] == rows[1]["amount_cents"]
+    assert snapshot["history"]["total_spending_cents"] == rows[1]["amount_cents"]
+    assert store.load()["merchant_mappings"]["example shop"]["category"] == "Groceries"
+    assert len(store.load()["import_runs"]) == 1
+    assert client.delete(f"/api/transactions/{rows[0]['id']}").status_code == 404
+
+    replay = client.post("/api/import", json=payload).json()
+    assert replay["rows_imported"] == 1
+    assert replay["duplicates_skipped"] == 1
+    for item in client.get("/api/state?month=2026-09").json()["transactions"]:
+        assert client.delete(f"/api/transactions/{item['id']}").status_code == 200
+    empty = client.get("/api/state?month=2026-09").json()
+    assert empty["dashboard"]["transaction_count"] == 0
+    assert empty["dashboard"]["total_spending_cents"] == 0
+    assert "2026-09" in empty["dashboard"]["available_months"]
+    assert store.load()["merchant_mappings"]["example shop"]["category"] == "Groceries"
+
+
+def test_deleting_synthetic_transaction_does_not_touch_persisted_data(tmp_path):
+    store = JsonStore(tmp_path / "state.json")
+    client = TestClient(create_app(store, seed_demo=False))
+    initial = client.get("/api/state?month=synthetic").json()
+    target = initial["transactions"][0]
+    assert client.delete(f"/api/transactions/{target['id']}").status_code == 200
+    changed = client.get("/api/state?month=synthetic").json()
+    assert changed["dashboard"]["transaction_count"] == 59
+    assert changed["dashboard"]["total_spending_cents"] == (
+        initial["dashboard"]["total_spending_cents"] - target["amount_cents"]
+    )
+    assert store.load() == empty_state()
+    restarted = TestClient(create_app(store, seed_demo=False))
+    restarted_state = restarted.get("/api/state?month=synthetic").json()
+    assert restarted_state["dashboard"]["transaction_count"] == 60
+
+
+def test_manual_transaction_updates_analytics_without_mapping_or_import_run(tmp_path):
+    store = JsonStore(tmp_path / "state.json")
+    client = TestClient(create_app(store, seed_demo=False))
+    payload = {
+        "date": "2026-09-18",
+        "description": "COFFEE SHOP #123 Seattle WA",
+        "amount": "4.75",
+        "category": "Food + coffee",
+        "source": "Checking",
+    }
+    response = client.post("/api/transactions", json=payload)
+    assert response.status_code == 201
+    transaction = response.json()
+    assert transaction["amount_cents"] == 475
+    assert transaction["source"] == "checking"
+    assert transaction["classification_source"] == "manual"
+    assert transaction["import_run_id"] is None
+    assert transaction["normalized_merchant"] != transaction["raw_description"].casefold()
+    snapshot = client.get("/api/state?month=2026-09").json()
+    assert snapshot["dashboard"]["total_spending_cents"] == 475
+    assert snapshot["transactions"][0]["id"] == transaction["id"]
+    assert store.load()["merchant_mappings"] == {}
+    assert store.load()["import_runs"] == []
+
+    repeated = client.post("/api/transactions", json=payload)
+    assert repeated.status_code == 201
+    assert repeated.json()["possible_duplicate"] is True
+    assert repeated.json()["id"] != transaction["id"]
+    refund = client.post("/api/transactions", json={**payload, "amount": "-1.25"})
+    assert refund.status_code == 201
+    assert client.get("/api/state?month=2026-09").json()["dashboard"]["total_spending_cents"] == 825
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("date", "2026-02-30"),
+        ("date", "09/18/2026"),
+        ("description", "  "),
+        ("amount", "0"),
+        ("amount", "4.999"),
+        ("category", "Unknown"),
+        ("source", "  "),
+    ],
+)
+def test_manual_transaction_rejects_invalid_input(tmp_path, field, value):
+    store = JsonStore(tmp_path / "state.json")
+    client = TestClient(create_app(store, seed_demo=False))
+    payload = {
+        "date": "2026-09-18",
+        "description": "Coffee shop",
+        "amount": "4.75",
+        "category": "Food + coffee",
+        "source": "manual",
+    }
+    assert client.post("/api/transactions", json={**payload, field: value}).status_code == 400
+    assert store.load()["transactions"] == []
+
+
+def test_manual_transaction_in_synthetic_month_is_isolated(tmp_path):
+    store = JsonStore(tmp_path / "state.json")
+    client = TestClient(create_app(store, seed_demo=False))
+    before = client.get("/api/state?month=synthetic").json()
+    response = client.post(
+        "/api/transactions",
+        json={
+            "date": "2026-06-15",
+            "description": "Demo coffee",
+            "amount": "5.00",
+            "category": "Food + coffee",
+            "demo": True,
+        },
+    )
+    assert response.status_code == 201
+    after = client.get("/api/state?month=synthetic").json()
+    assert after["dashboard"]["total_spending_cents"] == (
+        before["dashboard"]["total_spending_cents"] + 500
+    )
+    assert any(item["id"] == response.json()["id"] for item in after["transactions"])
+    assert store.load() == empty_state()
+    restarted = TestClient(create_app(store, seed_demo=False))
+    restarted_state = restarted.get("/api/state?month=synthetic").json()
+    assert (
+        restarted_state["dashboard"]["total_spending_cents"]
+        == before["dashboard"]["total_spending_cents"]
+    )
 
 
 def test_synthetic_june_dashboard_and_corrections():

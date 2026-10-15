@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 from collections import defaultdict
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -9,7 +10,8 @@ from uuid import uuid4
 
 from spend_tracker.classifiers import JevError, MerchantClassifier, UnconfiguredJevClassifier
 from spend_tracker.domain import Category, ClassificationSource
-from spend_tracker.parsing import ParsedInput
+from spend_tracker.normalization import normalize_merchant
+from spend_tracker.parsing import ParsedInput, parse_amount
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,59 @@ def digest(*parts: object) -> str:
 
 def timestamp() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def add_transaction(
+    state: dict,
+    *,
+    date: str,
+    description: str,
+    amount: str,
+    category: Category,
+    source: str = "manual",
+) -> dict:
+    """Add one categorized purchase or refund without creating an import run."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise ValueError("Date must be YYYY-MM-DD")
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("Invalid calendar date") from exc
+    description = description.strip()
+    if not description or len(description) > 500:
+        raise ValueError("Description must contain 1–500 characters")
+    merchant = normalize_merchant(description)
+    source = source.strip().casefold()
+    if not source or len(source) > 100:
+        raise ValueError("Account name must contain 1–100 characters")
+    cents = int(parse_amount(amount) * 100)
+    if cents == 0:
+        raise ValueError("Amount cannot be zero")
+    transaction_id = str(uuid4())
+    fingerprint = digest(source, date, cents, "USD", description.casefold().strip())
+    transaction = {
+        "id": transaction_id,
+        "import_run_id": None,
+        "source": source,
+        "source_transaction_id": None,
+        "dedupe_key": digest("manual", transaction_id),
+        "fingerprint": fingerprint,
+        "date": date,
+        "raw_description": description,
+        "normalized_merchant": merchant,
+        "amount_cents": cents,
+        "currency": "USD",
+        "category": category.value,
+        "classification_source": ClassificationSource.MANUAL.value,
+        "needs_review": False,
+        "possible_duplicate": any(
+            item["fingerprint"] == fingerprint for item in state["transactions"]
+        ),
+        "excluded_from_spending": False,
+        "created_at": timestamp(),
+    }
+    state["transactions"].append(transaction)
+    return transaction
 
 
 def import_transactions(
@@ -268,6 +323,25 @@ def set_duplicate_exclusion(state: dict, transaction_id: str, excluded: bool) ->
     if not transaction.get("possible_duplicate", False):
         raise ValueError("Only possible duplicates can be excluded here")
     transaction["excluded_from_spending"] = excluded
+
+
+def delete_transaction(state: dict, transaction_id: str) -> None:
+    for index, item in enumerate(state["transactions"]):
+        if item["id"] == transaction_id:
+            deleted = state["transactions"].pop(index)
+            first_remaining = True
+            for remaining in state["transactions"]:
+                if remaining["fingerprint"] != deleted["fingerprint"]:
+                    continue
+                if first_remaining:
+                    if remaining.get("possible_duplicate"):
+                        remaining["excluded_from_spending"] = False
+                    remaining["possible_duplicate"] = False
+                    first_remaining = False
+                else:
+                    remaining["possible_duplicate"] = True
+            return
+    raise ValueError("Transaction not found")
 
 
 def money(cents: int) -> str:

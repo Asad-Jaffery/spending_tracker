@@ -30,7 +30,9 @@ from spend_tracker.import_profiles import (
 )
 from spend_tracker.parsing import parse_csv, parse_json, preset_settings
 from spend_tracker.services import (
+    add_transaction,
     correct_category,
+    delete_transaction,
     import_transactions,
     retry_unclassified,
     set_duplicate_exclusion,
@@ -78,7 +80,10 @@ class TrackerApp:
         calendar_month = "2026-06" if synthetic else selected
         overview = dashboard(state, calendar_month)
         overview["month"] = selected
-        overview["available_months"] = [*months, "synthetic"]
+        overview["available_months"] = [
+            *sorted({*months, selected} - {"synthetic"}, reverse=True),
+            "synthetic",
+        ]
         return {
             "dashboard": overview,
             "history": spending_over_time(state),
@@ -217,6 +222,34 @@ class TrackerApp:
             self.store.save(state)
         return {"transaction_id": payload["transaction_id"], "excluded": payload["excluded"]}
 
+    def delete_transaction(self, transaction_id: str) -> dict:
+        with self.lock:
+            demo = any(
+                item["id"] == transaction_id for item in self.synthetic_state["transactions"]
+            )
+            state = self.synthetic_state if demo else self.store.load()
+            delete_transaction(state, transaction_id)
+            if not demo:
+                self.store.save(state)
+        return {"transaction_id": transaction_id, "deleted": True}
+
+    def add_transaction(self, payload: dict) -> dict:
+        category = Category(payload["category"])
+        with self.lock:
+            demo = payload.get("demo", False)
+            state = self.synthetic_state if demo else self.store.load()
+            transaction = add_transaction(
+                state,
+                date=payload["date"],
+                description=payload["description"],
+                amount=payload["amount"],
+                category=category,
+                source=payload["source"],
+            )
+            if not demo:
+                self.store.save(state)
+        return transaction
+
 
 class ImportRequest(BaseModel):
     filename: str
@@ -234,6 +267,15 @@ class CorrectionRequest(BaseModel):
     transaction_id: str
     category: str
     scope: str = "transaction"
+
+
+class AddTransactionRequest(BaseModel):
+    date: str
+    description: str
+    amount: str
+    category: str
+    source: str = "manual"
+    demo: bool = False
 
 
 class ImportSettingsRequest(BaseModel):
@@ -274,6 +316,13 @@ def create_app(store, *, seed_demo: bool = True) -> FastAPI:
         except (ValueError, KeyError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @api.post("/api/transactions", status_code=201)
+    def create_transaction(payload: AddTransactionRequest):
+        try:
+            return tracker.add_transaction(payload.model_dump())
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @api.post("/api/import-presets")
     def save_import_settings(payload: ImportSettingsRequest):
         try:
@@ -287,6 +336,13 @@ def create_app(store, *, seed_demo: bool = True) -> FastAPI:
             return tracker.exclude_duplicate(payload.model_dump())
         except (ValueError, KeyError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @api.delete("/api/transactions/{transaction_id}")
+    def remove_transaction(transaction_id: str):
+        try:
+            return tracker.delete_transaction(transaction_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @api.post("/api/retry-classification")
     def retry_classification():

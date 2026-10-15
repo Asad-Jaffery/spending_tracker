@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type DragEvent, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Chart as ChartJS, CategoryScale, LinearScale, LineController, LineElement, PointElement, BarController, BarElement, DoughnutController, ArcElement, Tooltip, type ChartData, type ChartOptions } from 'chart.js';
 import { Bar, Doughnut, Line } from 'react-chartjs-2';
@@ -37,7 +37,7 @@ type ImportPreset = { id: string; label: string; source: string; base_preset: st
 type Snapshot = { dashboard: Dashboard; history: SpendingHistory; transactions: Transaction[]; merchants: Mapping[]; categories: string[]; demo: boolean; jev_configured: boolean; import_presets: ImportPreset[]; new_card_settings: ImportSettings };
 type ImportReport = { rows_imported: number; duplicates_skipped: number; possible_duplicates: number; payments_skipped: number; non_posted_skipped: number; rules_skipped: number; rows_failed: number; jev_attempts: number; jev_failures?: number; jev_skipped_no_key?: number; jev_errors?: string[]; errors?: { line: number; message: string }[] };
 
-type Modal = { kind: 'import' } | { kind: 'correct'; transaction: Transaction } | { kind: 'report'; report: ImportReport } | null;
+type Modal = { kind: 'import' } | { kind: 'add' } | { kind: 'correct'; transaction: Transaction } | { kind: 'delete'; transaction: Transaction } | { kind: 'report'; report: ImportReport } | null;
 const colors: Record<string, string> = {
   Groceries: '#cf5824', 'Food + coffee': '#b68700', Transportation: '#3975bd',
   Shopping: '#c33f60', Entertainment: '#8553b4', Travel: '#178b96',
@@ -47,6 +47,12 @@ const trendColors = colors;
 const money = (cents: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(cents / 100);
 const signedMoney = (cents: number) => `${cents > 0 ? '+' : ''}${money(cents)}`;
 const monthName = (month: string, long = false) => month === 'synthetic' ? 'Synthetic' : new Intl.DateTimeFormat('en-US', { month: long ? 'long' : 'short', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${month}-01T12:00:00Z`));
+const defaultTransactionDate = (month: string) => {
+  if (month === 'synthetic') return '2026-06-15';
+  const today = new Date();
+  const localDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  return localDate.startsWith(month) ? localDate : `${month}-01`;
+};
 const sourceLabel = (source: string) => ({ jev: 'Jev', merchant_mapping: 'Saved mapping', manual: 'Manual', synthetic: 'Demo', unclassified: 'Needs review' } as Record<string, string>)[source] ?? source;
 const categoryStyle = (category: string) => ({ '--category-color': colors[category] ?? colors.Other }) as CSSProperties;
 
@@ -266,10 +272,78 @@ function OverTime({ data }: { data: SpendingHistory }) {
     </section>
   </>;
 }
-function Transactions({ snapshot, correct, toggleDuplicate }: { snapshot: Snapshot; correct: (transaction: Transaction) => void; toggleDuplicate: (transaction: Transaction) => void }) {
+function Transactions({ snapshot, add, correct, remove, toggleDuplicate, moveTransaction, moving }: {
+  snapshot: Snapshot;
+  add: () => void;
+  correct: (transaction: Transaction) => void;
+  remove: (transaction: Transaction) => void;
+  toggleDuplicate: (transaction: Transaction) => void;
+  moveTransaction: (transaction: Transaction, category: string) => Promise<void>;
+  moving: boolean;
+}) {
   const rows = snapshot.transactions;
-  if (!rows.length) return <><p className="section-intro">Transactions grouped by category. Correct one purchase or every transaction from its merchant.</p><div className="empty-state"><strong>No transactions for this month</strong>Import a CSV to get started.</div></>;
-  return <><p className="section-intro">Transactions grouped by category. Correct one purchase or every transaction from its merchant.</p><div className="toolbar"><span className="count">{rows.length} transactions · {monthName(snapshot.dashboard.month, true)}</span><span className="board-hint">Scroll to explore categories →</span></div><div className="category-board" role="region" aria-label="Transactions by category" tabIndex={0}>{snapshot.categories.map(category => { const items = rows.filter(item => item.category === category); const total = items.reduce((sum, item) => sum + (item.excluded_from_spending ? 0 : item.amount_cents), 0); return <section className="category-column" style={categoryStyle(category)} aria-label={`${category} transactions`} key={category}><header className="category-column-header"><div className="category-column-title"><span className="category-dot" /><h2>{category}</h2><span className="category-count">{items.length}</span></div><p>{money(total)} total</p></header><div className="category-card-list">{items.length ? items.map(item => <article className={`transaction-card ${item.needs_review ? 'needs-review' : ''}`} key={item.id}><div className="transaction-card-main"><strong className="transaction-description">{item.raw_description}</strong><strong className="transaction-amount">{money(item.amount_cents)}</strong></div><div className="transaction-merchant">{item.normalized_merchant}</div><div className="transaction-card-meta"><time dateTime={item.date}>{item.date}</time><span className={`transaction-source ${item.needs_review ? 'review' : ''}`}>{item.excluded_from_spending ? 'Not in totals' : sourceLabel(item.classification_source)}</span>{item.possible_duplicate && <><span className="transaction-source review">{item.excluded_from_spending ? "Excluded duplicate" : "Possible duplicate"}</span><button type="button" className="small-button" onClick={() => toggleDuplicate(item)}>{item.excluded_from_spending ? "Include in totals" : "Exclude from totals"}</button></>}<button type="button" className="small-button" onClick={() => correct(item)} aria-label={`Correct ${item.raw_description}`}>Correct</button></div></article>) : <p className="category-empty">No transactions this month</p>}</div></section>; })}</div></>;
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dropCategory, setDropCategory] = useState<string | null>(null);
+  const dragged = rows.find(item => item.id === draggedId);
+  const endDrag = () => { setDraggedId(null); setDropCategory(null); };
+  const startDrag = (event: DragEvent<HTMLElement>, item: Transaction) => {
+    if (moving) { event.preventDefault(); return; }
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', item.id);
+    setDraggedId(item.id);
+  };
+  const overCategory = (event: DragEvent<HTMLElement>, category: string) => {
+    if (!dragged || dragged.category === category || moving) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    if (dropCategory !== category) setDropCategory(category);
+  };
+  const leaveCategory = (event: DragEvent<HTMLElement>, category: string) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null) && dropCategory === category) setDropCategory(null);
+  };
+  const drop = (event: DragEvent<HTMLElement>, category: string) => {
+    event.preventDefault();
+    const item = rows.find(row => row.id === event.dataTransfer.getData('text/plain'));
+    endDrag();
+    if (item && item.category !== category && !moving) void moveTransaction(item, category);
+  };
+  if (!rows.length) return <><p className="section-intro">Transactions grouped by category. Correct one purchase or every transaction from its merchant.</p><div className="empty-state"><strong>No transactions for this month</strong><p>Import a CSV or add one transaction.</p><button type="button" className="button primary" onClick={add}>＋ Add transaction</button></div></>;
+  return <>
+    <p className="section-intro">Drag a transaction into another category to change only that purchase. Use Correct to update every transaction from a merchant.</p>
+    <div className="toolbar"><span className="count">{rows.length} transactions · {monthName(snapshot.dashboard.month, true)}</span><div className="transaction-toolbar-actions"><span className="board-hint">Scroll to explore categories →</span><button type="button" className="button primary" onClick={add}>＋ Add transaction</button></div></div>
+    <div className="category-board" role="region" aria-label="Transactions by category" tabIndex={0}>
+      {snapshot.categories.map(category => {
+        const items = rows.filter(item => item.category === category);
+        const total = items.reduce((sum, item) => sum + (item.excluded_from_spending ? 0 : item.amount_cents), 0);
+        const canDrop = !!dragged && dragged.category !== category && !moving;
+        return <section
+          className={`category-column ${dropCategory === category && canDrop ? 'drop-target' : ''}`}
+          style={categoryStyle(category)} aria-label={`${category} transactions`} key={category}
+          onDragOver={event => overCategory(event, category)}
+          onDragLeave={event => leaveCategory(event, category)}
+          onDrop={event => drop(event, category)}
+        >
+          <header className="category-column-header"><div className="category-column-title"><span className="category-dot" /><h2>{category}</h2><span className="category-count">{items.length}</span></div><p>{money(total)} total</p></header>
+          <div className="category-card-list">
+            {items.length ? items.map(item => <article
+              className={`transaction-card ${item.needs_review ? 'needs-review' : ''} ${draggedId === item.id ? 'dragging' : ''}`}
+              key={item.id} draggable={!moving} onDragStart={event => startDrag(event, item)} onDragEnd={endDrag}
+              title="Drag to another category"
+            >
+              <div className="transaction-card-main"><strong className="transaction-merchant-name">{item.normalized_merchant}</strong><strong className="transaction-amount">{money(item.amount_cents)}</strong></div>
+              {item.raw_description.trim().toLocaleLowerCase() !== item.normalized_merchant.trim().toLocaleLowerCase() && <div className="transaction-original" title={item.raw_description}>{item.raw_description}</div>}
+              <div className="transaction-card-meta"><time dateTime={item.date}>{item.date}</time><span className={`transaction-source ${item.needs_review ? 'review' : ''}`}>{item.excluded_from_spending ? 'Not in totals' : sourceLabel(item.classification_source)}</span>{item.possible_duplicate && <span className="transaction-source review">{item.excluded_from_spending ? 'Excluded duplicate' : 'Possible duplicate'}</span>}</div>
+              <div className="transaction-card-actions">
+                {item.possible_duplicate && <button type="button" className="small-button" onClick={() => toggleDuplicate(item)}>{item.excluded_from_spending ? 'Include in totals' : 'Exclude from totals'}</button>}
+                <button type="button" className="small-button" onClick={() => correct(item)} aria-label={`Correct ${item.raw_description}`}>Correct</button>
+                <button type="button" className="small-button danger" onClick={() => remove(item)} aria-label={`Delete ${item.raw_description} from ${item.date}`}>Delete</button>
+              </div>
+            </article>) : <p className="category-empty">{canDrop ? `Drop here for ${category}` : 'No transactions this month'}</p>}
+          </div>
+        </section>;
+      })}
+    </div>
+  </>;
 }
 function Review({ snapshot, correct, retry, busy }: { snapshot: Snapshot; correct: (transaction: Transaction) => void; retry: () => void; busy: boolean }) {
   const rows = snapshot.transactions.filter(item => item.needs_review);
@@ -342,7 +416,7 @@ function PresetSettingsEditor({ preset, settings, change, reset, busy }: {
     </details>
   </fieldset>;
 }
-function Dialog({ modal, snapshot, close, onCorrected, onImported, onSettingsSaved, notify }: { modal: Modal; snapshot: Snapshot; close: () => void; onCorrected: (scope: string, count: number) => Promise<void>; onImported: (report: ImportReport) => Promise<void>; onSettingsSaved: () => Promise<void>; notify: (message: string) => void }) {
+function Dialog({ modal, snapshot, close, onAdded, onCorrected, onDeleted, onImported, onSettingsSaved, notify }: { modal: Modal; snapshot: Snapshot; close: () => void; onAdded: (transaction: Transaction) => Promise<void>; onCorrected: (scope: string, count: number) => Promise<void>; onDeleted: () => Promise<void>; onImported: (report: ImportReport) => Promise<void>; onSettingsSaved: () => Promise<void>; notify: (message: string) => void }) {
   const [busy, setBusy] = useState(false);
   const [presetId, setPresetId] = useState('');
   const [settings, setSettings] = useState<ImportSettings | null>(null);
@@ -366,10 +440,29 @@ function Dialog({ modal, snapshot, close, onCorrected, onImported, onSettingsSav
     finally { setBusy(false); setSaving(false); }
   };
   if (!modal) return null;
+  const adding = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (modal.kind !== 'add') return; setBusy(true); const form = new FormData(event.currentTarget); try { const transaction = await post<Transaction>('/api/transactions', { date: form.get('date'), description: form.get('description'), amount: form.get('amount'), category: form.get('category'), source: form.get('source'), demo: snapshot.dashboard.month === 'synthetic' }); await onAdded(transaction); } catch (error) { notify((error as Error).message); setBusy(false); } };
   const correction = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (modal.kind !== 'correct') return; setBusy(true); const form = new FormData(event.currentTarget); try { const result = await post<{ scope: string; updated_transactions: number }>('/api/correct', { transaction_id: modal.transaction.id, category: form.get('category'), scope: form.get('scope') }); await onCorrected(result.scope, result.updated_transactions); } catch (error) { notify((error as Error).message); setBusy(false); } };
+  const deletion = async () => { if (modal.kind !== 'delete' || busy) return; setBusy(true); try { await request(`/api/transactions/${encodeURIComponent(modal.transaction.id)}`, { method: 'DELETE' }); await onDeleted(); } catch (error) { notify((error as Error).message); setBusy(false); } };
   const importing = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); const form = new FormData(event.currentTarget); const file = form.get('file'); if (!(file instanceof File) || !file.size || file.size > 5_000_000) { notify('Choose a file smaller than 5 MB'); setBusy(false); return; } try { const report = await post<ImportReport>('/api/import', { filename: file.name, content_base64: await fileBase64(file), source: form.get('source'), import_preset: presetId === 'new' ? 'custom' : presetId || null, import_settings: preset ? settings : null, date_format: form.get('date_format') ?? 'iso', amount_convention: form.get('amount_convention') ?? 'expenses_positive', column_mapping: preset ? null : customColumnMapping(form), currency: 'USD' }); await onImported(report); } catch (error) { notify((error as Error).message); setBusy(false); } };
   return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}><div className={`modal ${modal.kind === 'import' ? 'import-modal' : ''}`} role="dialog" aria-modal="true" aria-labelledby="dialog-title">
-    {modal.kind === 'correct' ? <><h2 id="dialog-title">Correct category</h2><p><strong>{modal.transaction.raw_description}</strong> is currently in <strong>{modal.transaction.category}</strong>.</p><form onSubmit={correction}><label htmlFor="correct-category">Correct category</label><select id="correct-category" name="category" defaultValue={modal.transaction.category}>{snapshot.categories.map(category => <option key={category}>{category}</option>)}</select><div className="scope-choice"><label><input type="radio" name="scope" value="transaction" defaultChecked /> This transaction only<span>Changes this row. The saved merchant category stays the same.</span></label><label><input type="radio" name="scope" value="merchant" /> All from this merchant<span>Updates existing rows and saves the category for future transactions.</span></label></div><div className="modal-actions"><button type="button" className="button secondary" onClick={close}>Cancel</button><button type="submit" className="button primary" disabled={busy}>{busy ? 'Saving…' : 'Save correction'}</button></div></form></> : modal.kind === 'import' ? <>
+    {modal.kind === 'add' ? <>
+      <h2 id="dialog-title">Add transaction</h2>
+      <p>Enter one purchase or refund. It will appear in your transactions and spending views.</p>
+      <form onSubmit={adding}>
+        <div className="manual-entry-grid"><div><label htmlFor="add-date">Date</label><input id="add-date" name="date" type="date" defaultValue={defaultTransactionDate(snapshot.dashboard.month)} min={snapshot.dashboard.month === 'synthetic' ? '2026-06-01' : undefined} max={snapshot.dashboard.month === 'synthetic' ? '2026-06-30' : undefined} required disabled={busy} /></div><div><label htmlFor="add-amount">Amount ($)</label><input id="add-amount" name="amount" type="text" inputMode="decimal" placeholder="25.00" pattern="-?[0-9]+(\.[0-9]{1,2})?" title="Enter dollars and cents, such as 25.00 or -5.00 for a refund" required disabled={busy} /></div></div>
+        <p className="file-hint">Use a positive amount for spending or a negative amount for a refund.</p>
+        <label htmlFor="add-description">Merchant or description</label><input id="add-description" name="description" maxLength={500} placeholder="e.g. Neighborhood coffee shop" required disabled={busy} />
+        <label htmlFor="add-category">Category</label><select id="add-category" name="category" defaultValue="" required disabled={busy}><option value="" disabled>Choose a category</option>{snapshot.categories.map(category => <option key={category} value={category}>{category}</option>)}</select>
+        <label htmlFor="add-source">Account name</label><input id="add-source" name="source" defaultValue="manual" maxLength={100} required disabled={busy} />
+        <p className="file-hint">A manual entry does not change saved merchant categories or call Jev. {snapshot.dashboard.month === 'synthetic' ? 'Entries in Synthetic are for this demo session only.' : 'The account name helps identify where this transaction came from.'}</p>
+        <div className="modal-actions"><button type="button" className="button secondary" onClick={close} disabled={busy}>Cancel</button><button type="submit" className="button primary" disabled={busy}>{busy ? 'Adding…' : 'Add transaction'}</button></div>
+      </form>
+    </> : modal.kind === 'correct' ? <><h2 id="dialog-title">Correct category</h2><p><strong>{modal.transaction.raw_description}</strong> is currently in <strong>{modal.transaction.category}</strong>.</p><form onSubmit={correction}><label htmlFor="correct-category">Correct category</label><select id="correct-category" name="category" defaultValue={modal.transaction.category}>{snapshot.categories.map(category => <option key={category}>{category}</option>)}</select><div className="scope-choice"><label><input type="radio" name="scope" value="transaction" defaultChecked /> This transaction only<span>Changes this row. The saved merchant category stays the same.</span></label><label><input type="radio" name="scope" value="merchant" /> All from this merchant<span>Updates existing rows and saves the category for future transactions.</span></label></div><div className="modal-actions"><button type="button" className="button secondary" onClick={close}>Cancel</button><button type="submit" className="button primary" disabled={busy}>{busy ? 'Saving…' : 'Save correction'}</button></div></form></> : modal.kind === 'delete' ? <>
+      <h2 id="dialog-title">Delete transaction?</h2>
+      <p><strong>{modal.transaction.raw_description}</strong> · {modal.transaction.date} · {money(modal.transaction.amount_cents)}</p>
+      <p>This removes only this transaction from your spending history and updates the totals. The saved merchant category will stay in place.</p>
+      <div className="modal-actions"><button type="button" className="button secondary" onClick={close} disabled={busy}>Cancel</button><button type="button" className="button danger" onClick={deletion} disabled={busy}>{busy ? 'Deleting…' : 'Delete transaction'}</button></div>
+    </> : modal.kind === 'import' ? <>
       <h2 id="dialog-title">Import transactions</h2>
       <p>Select a card preset or configure a custom import. Category labels in the file are ignored.</p>
       <form onSubmit={importing}>
@@ -427,6 +520,7 @@ function App() {
   const [message, setMessage] = useState('');
   const [loadingError, setLoadingError] = useState('');
   const [retrying, setRetrying] = useState(false);
+  const [moving, setMoving] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const notify = useCallback((value: string) => { setMessage(value); if (toastTimer.current) clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setMessage(''), 4200); }, []);
   const load = useCallback(async (month?: string) => { const data = await request<Snapshot>(`/api/state${month ? `?month=${encodeURIComponent(month)}` : ''}`); setSnapshot(data); setLoadingError(''); const url = new URL(window.location.href); url.searchParams.set('month', data.dashboard.month); window.history.replaceState(null, '', url); }, []);
@@ -441,10 +535,19 @@ function App() {
       notify(excluded ? 'Excluded the possible duplicate from spending totals' : 'Included the transaction in spending totals');
     } catch (error) { notify((error as Error).message); }
   };
+  const moveTransaction = async (transaction: Transaction, category: string) => {
+    setMoving(true);
+    try {
+      await post('/api/correct', { transaction_id: transaction.id, category, scope: 'transaction' });
+      await load(snapshot?.dashboard.month);
+      notify(`Moved transaction to ${category}`);
+    } catch (error) { notify((error as Error).message); }
+    finally { setMoving(false); }
+  };
   const isDashboard = page === 'overview' || page === 'over_time';
   const selectDashboardView = (view: 'overview' | 'over_time') => { setPage(view); setLastDashboardPage(view); };
   const titles: Record<Page, string> = { overview: 'Dashboard', over_time: 'Dashboard', transactions: 'Transactions', merchants: 'Merchants', review: 'Needs review' };
-  return <><div className="app-shell"><aside className="sidebar"><div className="brand">Spend<span>Tracker</span></div><nav aria-label="Main navigation">{([['overview', '⌂'], ['transactions', '▤'], ['merchants', '▣'], ['review', '◎']] as const).map(([item, icon]) => <button type="button" key={item} className={`nav-item ${(item === 'overview' ? isDashboard : page === item) ? 'active' : ''}`} onClick={() => setPage(item === 'overview' ? lastDashboardPage : item)}><span className="nav-icon">{icon}</span>{item === 'review' ? 'Review' : titles[item]}{item === 'review' && !!snapshot?.dashboard.review_count && <span className="nav-count">{snapshot.dashboard.review_count}</span>}</button>)}</nav><div className="sidebar-bottom"><button type="button" className="import-button" onClick={() => snapshot && setModal({ kind: 'import' })}>＋ Import CSV</button><p>Private, local spending view</p></div></aside><main className="main"><header className="topbar"><div><p className="eyebrow">{isDashboard ? 'PERSONAL FINANCE' : 'SPEND TRACKER'}</p><h1>{titles[page]}</h1></div><div className="top-actions">{snapshot?.demo && <span className="demo-pill">SYNTHETIC DATA</span>}{<label className="month-select">Month <select aria-label="Select month" value={snapshot?.dashboard.month ?? ''} onChange={event => load(event.target.value).catch(error => notify((error as Error).message))}>{(snapshot?.dashboard.available_months ?? []).map(month => <option value={month} key={month}>{monthName(month)}</option>)}</select></label>}</div></header>{isDashboard && <nav className="view-nav" aria-label="Dashboard views"><button type="button" className={page === 'overview' ? 'view-tab active' : 'view-tab'} aria-current={page === 'overview' ? 'page' : undefined} onClick={() => selectDashboardView('overview')}>Monthly view</button><button type="button" className={page === 'over_time' ? 'view-tab active' : 'view-tab'} aria-current={page === 'over_time' ? 'page' : undefined} onClick={() => selectDashboardView('over_time')}>Over time</button></nav>}<div className="content" aria-live="polite">{snapshot ? page === 'overview' ? <Overview data={snapshot.dashboard} correct={transaction => setModal({ kind: 'correct', transaction })} /> : page === 'over_time' ? <OverTime data={snapshot.history} /> : page === 'transactions' ? <Transactions snapshot={snapshot} correct={transaction => setModal({ kind: 'correct', transaction })} toggleDuplicate={toggleDuplicate} /> : page === 'merchants' ? <Merchants items={snapshot.merchants} /> : <Review snapshot={snapshot} correct={transaction => setModal({ kind: 'correct', transaction })} retry={retry} busy={retrying} /> : <div className="empty-state"><strong>{loadingError ? 'Could not load Spend Tracker' : 'Loading Spend Tracker…'}</strong>{loadingError}</div>}</div></main></div>{snapshot && <Dialog key={modal?.kind === 'correct' ? modal.transaction.id : modal?.kind ?? 'none'} modal={modal} snapshot={snapshot} close={() => setModal(null)} notify={notify} onCorrected={async (scope, count) => { setModal(null); await load(snapshot.dashboard.month); notify(scope === 'merchant' ? `Updated ${count} ${count === 1 ? 'transaction' : 'transactions'} and saved the merchant category` : 'Updated this transaction'); }} onImported={handleImported} onSettingsSaved={async () => { await load(snapshot.dashboard.month); }} />}{message && <div id="toast" className="show" role="status" aria-live="polite">{message}</div>}</>;
+  return <><div className="app-shell"><aside className="sidebar"><div className="brand">Spend<span>Tracker</span></div><nav aria-label="Main navigation">{([['overview', '⌂'], ['transactions', '▤'], ['merchants', '▣'], ['review', '◎']] as const).map(([item, icon]) => <button type="button" key={item} className={`nav-item ${(item === 'overview' ? isDashboard : page === item) ? 'active' : ''}`} onClick={() => setPage(item === 'overview' ? lastDashboardPage : item)}><span className="nav-icon">{icon}</span>{item === 'review' ? 'Review' : titles[item]}{item === 'review' && !!snapshot?.dashboard.review_count && <span className="nav-count">{snapshot.dashboard.review_count}</span>}</button>)}</nav><div className="sidebar-bottom"><button type="button" className="import-button" onClick={() => snapshot && setModal({ kind: 'import' })}>＋ Import CSV</button><button type="button" className="manual-entry-button" onClick={() => snapshot && setModal({ kind: 'add' })}>＋ Add transaction</button><p>Private, local spending view</p></div></aside><main className="main"><header className="topbar"><div><p className="eyebrow">{isDashboard ? 'PERSONAL FINANCE' : 'SPEND TRACKER'}</p><h1>{titles[page]}</h1></div><div className="top-actions">{snapshot?.demo && <span className="demo-pill">SYNTHETIC DATA</span>}{<label className="month-select">Month <select aria-label="Select month" value={snapshot?.dashboard.month ?? ''} onChange={event => load(event.target.value).catch(error => notify((error as Error).message))}>{(snapshot?.dashboard.available_months ?? []).map(month => <option value={month} key={month}>{monthName(month)}</option>)}</select></label>}</div></header>{isDashboard && <nav className="view-nav" aria-label="Dashboard views"><button type="button" className={page === 'overview' ? 'view-tab active' : 'view-tab'} aria-current={page === 'overview' ? 'page' : undefined} onClick={() => selectDashboardView('overview')}>Monthly view</button><button type="button" className={page === 'over_time' ? 'view-tab active' : 'view-tab'} aria-current={page === 'over_time' ? 'page' : undefined} onClick={() => selectDashboardView('over_time')}>Over time</button></nav>}<div className="content" aria-live="polite">{snapshot ? page === 'overview' ? <Overview data={snapshot.dashboard} correct={transaction => setModal({ kind: 'correct', transaction })} /> : page === 'over_time' ? <OverTime data={snapshot.history} /> : page === 'transactions' ? <Transactions snapshot={snapshot} add={() => setModal({ kind: 'add' })} correct={transaction => setModal({ kind: 'correct', transaction })} remove={transaction => setModal({ kind: 'delete', transaction })} toggleDuplicate={toggleDuplicate} moveTransaction={moveTransaction} moving={moving} /> : page === 'merchants' ? <Merchants items={snapshot.merchants} /> : <Review snapshot={snapshot} correct={transaction => setModal({ kind: 'correct', transaction })} retry={retry} busy={retrying} /> : <div className="empty-state"><strong>{loadingError ? 'Could not load Spend Tracker' : 'Loading Spend Tracker…'}</strong>{loadingError}</div>}</div></main></div>{snapshot && <Dialog key={modal?.kind === 'correct' || modal?.kind === 'delete' ? `${modal.kind}-${modal.transaction.id}` : modal?.kind ?? 'none'} modal={modal} snapshot={snapshot} close={() => setModal(null)} notify={notify} onAdded={async transaction => { setModal(null); await load(snapshot.dashboard.month === 'synthetic' ? 'synthetic' : transaction.date.slice(0, 7)); setPage('transactions'); notify('Added transaction'); }} onCorrected={async (scope, count) => { setModal(null); await load(snapshot.dashboard.month); notify(scope === 'merchant' ? `Updated ${count} ${count === 1 ? 'transaction' : 'transactions'} and saved the merchant category` : 'Updated this transaction'); }} onDeleted={async () => { setModal(null); await load(snapshot.dashboard.month); notify('Deleted transaction'); }} onImported={handleImported} onSettingsSaved={async () => { await load(snapshot.dashboard.month); }} />}{message && <div id="toast" className="show" role="status" aria-live="polite">{message}</div>}</>;
 }
 
 createRoot(document.getElementById('root')!).render(<App />);
