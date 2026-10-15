@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import copy
 import re
 import threading
 from datetime import datetime
@@ -13,13 +14,29 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from spend_tracker.analytics import available_months, dashboard, transactions_for_month
+from spend_tracker.analytics import (
+    available_months,
+    dashboard,
+    spending_over_time,
+    transactions_for_month,
+)
 from spend_tracker.classifiers import JevClassifier, UnconfiguredJevClassifier
 from spend_tracker.config import jev_api_key
 from spend_tracker.domain import Category
-from spend_tracker.parsing import parse_csv, parse_json
-from spend_tracker.services import correct_category, import_transactions, retry_unclassified
-from spend_tracker.synthetic import seed_june, seed_may
+from spend_tracker.import_profiles import (
+    import_profiles,
+    resolve_import_profile,
+    save_import_profile,
+)
+from spend_tracker.parsing import parse_csv, parse_json, preset_settings
+from spend_tracker.services import (
+    correct_category,
+    import_transactions,
+    retry_unclassified,
+    set_duplicate_exclusion,
+)
+from spend_tracker.storage import empty_state
+from spend_tracker.synthetic import seed_june, seed_may, seed_presentation_history
 
 MAX_UPLOAD_BYTES = 5_000_000
 MONTH_PATTERN = re.compile(r"^\d{4}-(?:0[1-9]|1[0-2])$")
@@ -29,6 +46,8 @@ class TrackerApp:
     def __init__(self, store, *, seed_demo: bool = True):
         self.store = store
         self.lock = threading.RLock()
+        self.synthetic_state = empty_state()
+        seed_presentation_history(self.synthetic_state)
         if seed_demo:
             with self.lock:
                 state = self.store.load()
@@ -45,23 +64,47 @@ class TrackerApp:
     def snapshot(self, month: str | None = None) -> dict:
         with self.lock:
             state = self.store.load()
+            profiles = import_profiles(state)
+            demo_state = copy.deepcopy(self.synthetic_state) if month == "synthetic" else None
         months = available_months(state)
         selected = month or (months[0] if months else "2026-06")
-        if not MONTH_PATTERN.fullmatch(selected):
+        synthetic = selected == "synthetic"
+        if not synthetic and not MONTH_PATTERN.fullmatch(selected):
             raise ValueError("Month must be YYYY-MM")
-        datetime.strptime(selected, "%Y-%m")
+        if not synthetic:
+            datetime.strptime(selected, "%Y-%m")
+        else:
+            state = demo_state
+        calendar_month = "2026-06" if synthetic else selected
+        overview = dashboard(state, calendar_month)
+        overview["month"] = selected
+        overview["available_months"] = [*months, "synthetic"]
         return {
-            "dashboard": dashboard(state, selected),
-            "transactions": transactions_for_month(state, selected),
+            "dashboard": overview,
+            "history": spending_over_time(state),
+            "transactions": transactions_for_month(state, calendar_month),
             "merchants": sorted(
                 state["merchant_mappings"].values(),
                 key=lambda item: item["display_name"].casefold(),
             ),
             "import_runs": list(reversed(state["import_runs"][-10:])),
             "categories": [category.value for category in Category],
-            "demo": any(item["source"].startswith("synthetic-") for item in state["transactions"]),
+            "demo": synthetic
+            or (
+                bool(state["transactions"])
+                and all(item["source"].startswith("synthetic-") for item in state["transactions"])
+            ),
             "jev_configured": bool(jev_api_key()),
+            "import_presets": profiles,
+            "new_card_settings": preset_settings("custom"),
         }
+
+    def save_import_settings(self, payload: dict) -> dict:
+        with self.lock:
+            state = self.store.load()
+            profile = save_import_profile(state, payload)
+            self.store.save(state)
+        return profile
 
     def import_file(self, payload: dict) -> dict:
         filename = str(payload.get("filename", ""))
@@ -73,6 +116,11 @@ class TrackerApp:
             raise ValueError("File content is missing or invalid") from exc
         if len(content) > MAX_UPLOAD_BYTES:
             raise ValueError("File exceeds the 5 MB limit")
+        import_preset = payload.get("import_preset")
+        if import_preset is not None and not filename.lower().endswith(".csv"):
+            raise ValueError("Card import presets require a CSV file")
+        if payload.get("import_settings") is not None and import_preset is None:
+            raise ValueError("Choose a card preset before supplying preset settings")
         if payload.get("date_format", "iso") not in ("iso", "us"):
             raise ValueError("Date format must be iso or us")
         if payload.get("amount_convention", "expenses_positive") not in (
@@ -84,20 +132,34 @@ class TrackerApp:
             payload.get("currency", "USD"), str
         ):
             raise ValueError("Source and currency must be text")
-        if filename.lower().endswith(".csv"):
-            parsed = parse_csv(
-                content,
-                date_format=payload.get("date_format", "iso"),
-                amount_convention=payload.get("amount_convention", "expenses_positive"),
-            )
-        elif filename.lower().endswith(".json"):
-            parsed = parse_json(content)
-        else:
-            raise ValueError("File must end in .csv or .json")
-        key = jev_api_key()
-        classifier = JevClassifier(key) if key else UnconfiguredJevClassifier()
         with self.lock:
             state = self.store.load()
+            base_preset, settings = (
+                resolve_import_profile(state, import_preset, payload.get("import_settings"))
+                if import_preset is not None
+                else (None, None)
+            )
+            source_key = payload["source"].strip().casefold()
+            custom_mapping = payload.get("column_mapping")
+            if filename.lower().endswith(".csv"):
+                parsed = parse_csv(
+                    content,
+                    date_format=payload.get("date_format", "iso"),
+                    amount_convention=payload.get("amount_convention", "expenses_positive"),
+                    column_mapping=(
+                        custom_mapping
+                        if custom_mapping is not None
+                        else state["csv_column_mappings"].get(source_key)
+                    ),
+                    import_preset=base_preset,
+                    import_settings=settings,
+                )
+            elif filename.lower().endswith(".json"):
+                parsed = parse_json(content)
+            else:
+                raise ValueError("File must end in .csv or .json")
+            key = jev_api_key()
+            classifier = JevClassifier(key) if key else UnconfiguredJevClassifier()
             report = import_transactions(
                 state,
                 parsed,
@@ -107,6 +169,12 @@ class TrackerApp:
                 currency=payload.get("currency", "USD"),
                 classifier=classifier,
             )
+            if (
+                filename.lower().endswith(".csv")
+                and custom_mapping is not None
+                and import_preset is None
+            ):
+                state["csv_column_mappings"][source_key] = custom_mapping
             self.store.save(state)
         return report
 
@@ -123,15 +191,31 @@ class TrackerApp:
     def correct(self, payload: dict) -> dict:
         category = Category(payload.get("category"))
         with self.lock:
-            state = self.store.load()
+            demo = any(
+                item["id"] == payload.get("transaction_id")
+                for item in self.synthetic_state["transactions"]
+            )
+            state = self.synthetic_state if demo else self.store.load()
             count = correct_category(
                 state,
                 str(payload.get("transaction_id", "")),
                 category,
                 str(payload.get("scope", "transaction")),
             )
-            self.store.save(state)
+            if not demo:
+                self.store.save(state)
         return {"updated_transactions": count, "scope": payload.get("scope", "transaction")}
+
+    def exclude_duplicate(self, payload: dict) -> dict:
+        with self.lock:
+            state = self.store.load()
+            set_duplicate_exclusion(
+                state,
+                str(payload.get("transaction_id", "")),
+                bool(payload.get("excluded", True)),
+            )
+            self.store.save(state)
+        return {"transaction_id": payload["transaction_id"], "excluded": payload["excluded"]}
 
 
 class ImportRequest(BaseModel):
@@ -141,12 +225,28 @@ class ImportRequest(BaseModel):
     currency: str = "USD"
     date_format: str = "iso"
     amount_convention: str = "expenses_positive"
+    column_mapping: dict[str, str] | None = None
+    import_preset: str | None = None
+    import_settings: dict | None = None
 
 
 class CorrectionRequest(BaseModel):
     transaction_id: str
     category: str
     scope: str = "transaction"
+
+
+class ImportSettingsRequest(BaseModel):
+    id: str | None = None
+    label: str
+    source: str
+    base_preset: str = "custom"
+    settings: dict
+
+
+class DuplicateExclusionRequest(BaseModel):
+    transaction_id: str
+    excluded: bool
 
 
 def create_app(store, *, seed_demo: bool = True) -> FastAPI:
@@ -171,6 +271,20 @@ def create_app(store, *, seed_demo: bool = True) -> FastAPI:
     def correct(payload: CorrectionRequest):
         try:
             return tracker.correct(payload.model_dump())
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @api.post("/api/import-presets")
+    def save_import_settings(payload: ImportSettingsRequest):
+        try:
+            return tracker.save_import_settings(payload.model_dump())
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @api.post("/api/duplicate-exclusion")
+    def duplicate_exclusion(payload: DuplicateExclusionRequest):
+        try:
+            return tracker.exclude_duplicate(payload.model_dump())
         except (ValueError, KeyError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

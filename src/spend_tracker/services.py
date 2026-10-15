@@ -46,6 +46,9 @@ def import_transactions(
         "duplicates_skipped": 0,
         "possible_duplicates": 0,
         "rows_failed": len(parsed.errors),
+        "payments_skipped": parsed.payments_skipped,
+        "non_posted_skipped": parsed.non_posted_skipped,
+        "rules_skipped": parsed.rules_skipped,
         "jev_attempts": 0,
         "jev_failures": 0,
         "jev_skipped_no_key": 0,
@@ -251,8 +254,20 @@ def correct_category(
         item["category"] = category.value
         item["classification_source"] = ClassificationSource.MANUAL.value
         item["needs_review"] = False
-        item["excluded_from_spending"] = False
+        if not item.get("possible_duplicate", False):
+            item["excluded_from_spending"] = False
     return len(targets)
+
+
+def set_duplicate_exclusion(state: dict, transaction_id: str, excluded: bool) -> None:
+    transaction = next(
+        (item for item in state["transactions"] if item["id"] == transaction_id), None
+    )
+    if transaction is None:
+        raise ValueError("Transaction not found")
+    if not transaction.get("possible_duplicate", False):
+        raise ValueError("Only possible duplicates can be excluded here")
+    transaction["excluded_from_spending"] = excluded
 
 
 def money(cents: int) -> str:

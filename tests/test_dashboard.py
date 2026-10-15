@@ -1,13 +1,179 @@
 import base64
+import json
 
+import pytest
 from fastapi.testclient import TestClient
 
-from spend_tracker.analytics import dashboard
+from spend_tracker.analytics import dashboard, spending_over_time
 from spend_tracker.domain import Category
 from spend_tracker.services import correct_category
 from spend_tracker.storage import JsonStore, empty_state
-from spend_tracker.synthetic import seed_june, seed_may
+from spend_tracker.synthetic import seed_june, seed_may, seed_presentation_history
 from spend_tracker.webapp import create_app
+
+
+@pytest.mark.parametrize(
+    ("preset", "content"),
+    [
+        (
+            "wells_fargo",
+            b"DATE,DESCRIPTION,AMOUNT,CHECK #,STATUS\n"
+            b"46293,Example shop,-20.00,,Posted\n"
+            b"46293,Example shop,5.00,,Posted\n"
+            b"46293,ONLINE PAYMENT THANK YOU,100.00,,Posted\n",
+        ),
+        (
+            "robinhood",
+            b"Date,Time,Description,Amount,Type,Merchant\n"
+            b"46293.708333333336,1:00 PM,Example shop,20.00,Purchase,Shop\n"
+            b"46293.708333333336,2:00 PM,Example shop,-5.00,Refund,Shop\n"
+            b"46293.708333333336,3:00 PM,PAYMENT - THANK YOU,-100.00,Payment,Payment\n",
+        ),
+    ],
+)
+def test_card_import_api_skips_payments_and_counts_refunds(tmp_path, monkeypatch, preset, content):
+    monkeypatch.setattr("spend_tracker.webapp.jev_api_key", lambda: None)
+    store = JsonStore(tmp_path / "cards.json")
+    state = empty_state()
+    state["csv_column_mappings"]["example-card"] = {"date": "wrong"}
+    store.save(state)
+    client = TestClient(create_app(store, seed_demo=False))
+    assert {item["id"] for item in client.get("/api/state").json()["import_presets"]} == {
+        "wells_fargo",
+        "robinhood",
+    }
+    payload = {
+        "filename": "card.csv",
+        "content_base64": base64.b64encode(content).decode(),
+        "source": "example-card",
+        "import_preset": preset,
+    }
+    response = client.post("/api/import", json=payload)
+    assert response.status_code == 200
+    report = response.json()
+    assert report["rows_imported"] == 2
+    assert report["rows_processed"] == 3
+    assert report["payments_skipped"] == 1
+    assert report["rows_failed"] == 0
+    assert report["jev_skipped_no_key"] == 1
+    snapshot = client.get("/api/state?month=2026-09").json()
+    assert snapshot["dashboard"]["total_spending_cents"] == 1500
+    assert snapshot["history"]["total_spending_cents"] == 1500
+    assert len(store.load()["transactions"]) == 2
+    assert store.load()["csv_column_mappings"]["example-card"] == {"date": "wrong"}
+    replay = client.post("/api/import", json=payload).json()
+    assert replay["duplicates_skipped"] == 2
+    assert replay["payments_skipped"] == 1
+
+
+def test_card_import_api_rejects_unknown_presets_and_json(tmp_path):
+    client = TestClient(create_app(JsonStore(tmp_path / "cards.json"), seed_demo=False))
+    payload = {
+        "filename": "card.csv",
+        "content_base64": base64.b64encode(b"[]").decode(),
+        "source": "example-card",
+        "import_preset": "unknown",
+    }
+    assert client.post("/api/import", json=payload).status_code == 400
+    payload.update(filename="card.json", import_preset="robinhood")
+    response = client.post("/api/import", json=payload)
+    assert response.status_code == 400
+    assert "require a CSV" in response.json()["detail"]
+
+
+def test_api_uses_edited_preset_settings_without_changing_defaults(tmp_path, monkeypatch):
+    monkeypatch.setattr("spend_tracker.webapp.jev_api_key", lambda: None)
+    store = JsonStore(tmp_path / "cards.json")
+    client = TestClient(create_app(store, seed_demo=False))
+    payload = {
+        "filename": "card.csv",
+        "content_base64": base64.b64encode(
+            b"Day,Memo,Charge,State\n09/01/2026,ONLINE PAYMENT THANK YOU,20,Pending\n"
+        ).decode(),
+        "source": "example-card",
+        "import_preset": "wells_fargo",
+        "import_settings": {
+            "date_format": "us",
+            "amount_convention": "expenses_positive",
+            "column_mapping": {"date": "Day", "description": "Memo", "amount": "Charge"},
+            "skip_payments": False,
+            "skip_non_posted": False,
+        },
+    }
+    response = client.post("/api/import", json=payload)
+    assert response.status_code == 200
+    assert response.json()["rows_imported"] == 1
+    assert response.json()["payments_skipped"] == 0
+    assert store.load()["transactions"][0]["amount_cents"] == 2000
+    defaults = client.get("/api/state").json()["import_presets"][0]["settings"]
+    assert defaults["skip_payments"] is True
+    assert defaults["amount_convention"] == "expenses_negative"
+    assert defaults["column_mapping"]["date"] == "DATE"
+    payload["import_settings"]["date_format"] = "unknown"
+    assert client.post("/api/import", json=payload).status_code == 400
+    assert len(store.load()["transactions"]) == 1
+
+
+def test_possible_duplicate_can_be_excluded_and_restored(tmp_path, monkeypatch):
+    monkeypatch.setattr("spend_tracker.webapp.jev_api_key", lambda: None)
+    store = JsonStore(tmp_path / "cards.json")
+    client = TestClient(create_app(store, seed_demo=False))
+
+    def total_spending():
+        return client.get("/api/state?month=2026-09").json()["dashboard"]["total_spending_cents"]
+
+    header = b"DATE,DESCRIPTION,AMOUNT,CHECK #,STATUS\n"
+    first = header + b"09/01/2026,Example shop,-20,,Posted\n09/02/2026,Another shop,-30,,Posted\n"
+    second = header + b"09/02/2026,Another shop,-30,,Posted\n09/03/2026,Third shop,-40,,Posted\n"
+    for content in (first, second):
+        response = client.post(
+            "/api/import",
+            json={
+                "filename": "card.csv",
+                "content_base64": base64.b64encode(content).decode(),
+                "source": "wells-fargo-active-cash",
+                "import_preset": "wells_fargo",
+            },
+        )
+        assert response.status_code == 200
+    assert response.json()["possible_duplicates"] == 1
+
+    state = client.get("/api/state?month=2026-09").json()
+    assert state["dashboard"]["total_spending_cents"] == 12000
+    duplicate = next(item for item in state["transactions"] if item["possible_duplicate"])
+    assert (
+        client.post(
+            "/api/duplicate-exclusion",
+            json={"transaction_id": duplicate["id"], "excluded": True},
+        ).status_code
+        == 200
+    )
+    assert total_spending() == 9000
+    assert (
+        client.post(
+            "/api/correct",
+            json={"transaction_id": duplicate["id"], "category": "Groceries"},
+        ).status_code
+        == 200
+    )
+    assert total_spending() == 9000
+    assert (
+        client.post(
+            "/api/duplicate-exclusion",
+            json={"transaction_id": duplicate["id"], "excluded": False},
+        ).status_code
+        == 200
+    )
+    assert total_spending() == 12000
+
+    unrelated = next(item for item in state["transactions"] if not item["possible_duplicate"])
+    assert (
+        client.post(
+            "/api/duplicate-exclusion",
+            json={"transaction_id": unrelated["id"], "excluded": True},
+        ).status_code
+        == 400
+    )
 
 
 def test_synthetic_june_dashboard_and_corrections():
@@ -57,6 +223,72 @@ def test_previous_calendar_month_comparison():
     assert groceries["current_cents"] > groceries["previous_cents"]
     assert seed_may(state)["duplicates_skipped"] == 47
     assert dashboard(empty_state(), "2026-01")["comparison"]["previous_month"] == "2025-12"
+
+
+def test_spending_over_time_includes_gaps_and_excludes_non_spending():
+    state = empty_state()
+    assert spending_over_time(state)["months"] == []
+    state["transactions"] = [
+        {"date": "2026-05-10", "category": "Groceries", "amount_cents": 5000},
+        {"date": "2026-06-02", "category": "Groceries", "amount_cents": 2500},
+        {"date": "2026-08-01", "category": "Travel", "amount_cents": 12000},
+        {
+            "date": "2026-08-03",
+            "category": "Other",
+            "amount_cents": 200000,
+            "excluded_from_spending": True,
+        },
+    ]
+    history = spending_over_time(state)
+    assert [item["month"] for item in history["months"]] == [
+        "2026-05",
+        "2026-06",
+        "2026-07",
+        "2026-08",
+    ]
+    assert [item["total_cents"] for item in history["months"]] == [5000, 2500, 0, 12000]
+    assert history["months"][0]["categories"]["Groceries"] == 5000
+    assert history["months"][0]["categories"]["Travel"] == 0
+    assert history["total_spending_cents"] == 19500
+    assert history["transaction_count"] == 4
+    assert history["months_tracked"] == 3
+
+
+def test_import_api_accepts_custom_csv_columns_and_explains_mismatch(tmp_path, monkeypatch):
+    monkeypatch.setattr("spend_tracker.webapp.jev_api_key", lambda: None)
+    store = JsonStore(tmp_path / "custom.json")
+    client = TestClient(create_app(store, seed_demo=False))
+    content = b"Posted On,Transaction Details,Charge\n2026-06-10,Coffee,4.50\n"
+    payload = {
+        "filename": "bank.csv",
+        "content_base64": base64.b64encode(content).decode(),
+        "source": "checking",
+    }
+    unmatched = client.post("/api/import", json=payload)
+    assert unmatched.status_code == 400
+    assert "Enter a custom column mapping" in unmatched.json()["detail"]
+    payload["column_mapping"] = {
+        "date": "Posted On",
+        "description": "Transaction Details",
+        "amount": "Charge",
+    }
+    imported = client.post("/api/import", json=payload)
+    assert imported.status_code == 200
+    assert imported.json()["rows_imported"] == 1
+    assert (
+        client.get("/api/state?month=2026-06").json()["transactions"][0]["raw_description"]
+        == "Coffee"
+    )
+    assert store.load()["csv_column_mappings"]["checking"] == payload["column_mapping"]
+    next_content = b"Posted On,Transaction Details,Charge\n2026-06-11,Tea,3.00\n"
+    next_payload = {
+        "filename": "next.csv",
+        "content_base64": base64.b64encode(next_content).decode(),
+        "source": "checking",
+    }
+    restarted = TestClient(create_app(store, seed_demo=False))
+    assert restarted.post("/api/import", json=next_payload).json()["rows_imported"] == 1
+    assert len(restarted.get("/api/state?month=2026-06").json()["transactions"]) == 2
 
 
 def test_saved_legacy_categories_migrate_without_counting_income_or_transfers(tmp_path):
@@ -118,6 +350,7 @@ def test_web_workflow(tmp_path, monkeypatch):
     initial = client.get("/api/state?month=2026-06").json()
     assert initial["dashboard"]["review_count"] == 10
     assert initial["dashboard"]["comparison"]["has_previous_data"] is True
+    assert [item["month"] for item in initial["history"]["months"]] == ["2026-05", "2026-06"]
     assert len(initial["merchants"]) >= 20
     assert initial["categories"] == [category.value for category in Category]
     csv = (
@@ -148,3 +381,71 @@ def test_web_workflow(tmp_path, monkeypatch):
         for item in final["merchants"]
     )
     assert final["dashboard"]["review_count"] == 10
+
+
+def test_synthetic_month_is_isolated_and_corrections_do_not_touch_real_data(tmp_path, monkeypatch):
+    monkeypatch.setattr("spend_tracker.webapp.jev_api_key", lambda: None)
+    store = JsonStore(tmp_path / "state.json")
+    client = TestClient(create_app(store, seed_demo=False))
+    response = client.post(
+        "/api/import",
+        json={
+            "filename": "private.csv",
+            "source": "real-account",
+            "content_base64": base64.b64encode(
+                b"date,description,amount\n2026-06-10,PRIVATE SHOP,100\n"
+            ).decode(),
+        },
+    )
+    assert response.status_code == 200
+    before = store.load()
+    demo = client.get("/api/state?month=synthetic").json()
+    assert demo["dashboard"]["month"] == "synthetic"
+    assert "synthetic" in demo["dashboard"]["available_months"]
+    assert demo["dashboard"]["transaction_count"] == 60
+    assert demo["dashboard"]["review_count"] == 10
+    assert demo["dashboard"]["comparison"]["has_previous_data"] is True
+    assert demo["history"]["transaction_count"] == 347
+    assert demo["history"]["months_tracked"] == 6
+    assert [row["month"] for row in demo["history"]["months"]] == [
+        f"2026-{month:02d}" for month in range(1, 7)
+    ]
+    for category in demo["categories"]:
+        values = [row["categories"][category] for row in demo["history"]["months"]]
+        assert all(value > 0 for value in values)
+        assert len(set(values)) > 1
+    assert demo["demo"] is True
+    assert "PRIVATE SHOP" not in json.dumps(demo)
+    assert all(row["source"].startswith("synthetic-") for row in demo["transactions"])
+    target = demo["transactions"][0]
+    assert (
+        client.post(
+            "/api/correct",
+            json={"transaction_id": target["id"], "category": "Groceries", "scope": "merchant"},
+        ).status_code
+        == 200
+    )
+    changed = client.get("/api/state?month=synthetic").json()
+    assert (
+        next(row for row in changed["transactions"] if row["id"] == target["id"])["category"]
+        == "Groceries"
+    )
+    assert store.load() == before
+    real = client.get("/api/state?month=2026-06").json()
+    assert real["dashboard"]["transaction_count"] == 1
+    assert real["demo"] is False
+
+
+def test_presentation_history_is_repeatable_and_never_calls_jev():
+    state = empty_state()
+    reports = seed_presentation_history(state)
+    assert sum(report["rows_imported"] for report in reports) == 347
+    assert sum(report["jev_attempts"] for report in reports) == 0
+    expected = spending_over_time(state)
+    replay = seed_presentation_history(state)
+    assert sum(report["rows_imported"] for report in replay) == 0
+    assert sum(report["duplicates_skipped"] for report in replay) == 347
+    assert spending_over_time(state) == expected
+    another_state = empty_state()
+    seed_presentation_history(another_state)
+    assert spending_over_time(another_state) == expected

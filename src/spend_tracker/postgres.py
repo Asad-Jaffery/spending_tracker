@@ -1,4 +1,4 @@
-"""Optional PostgreSQL storage using three durable tables.
+"""Optional PostgreSQL storage using five durable tables.
 
 The service layer still owns classification rules. Each save replaces the
 single-user snapshot inside one database transaction.
@@ -36,6 +36,14 @@ class PostgresStore:
                 "CREATE TABLE IF NOT EXISTS spend_tracker_import_runs "
                 "(id uuid PRIMARY KEY, payload jsonb NOT NULL)"
             )
+            cursor.execute(
+                "CREATE TABLE IF NOT EXISTS spend_tracker_csv_column_mappings "
+                "(source text PRIMARY KEY, payload jsonb NOT NULL)"
+            )
+            cursor.execute(
+                "CREATE TABLE IF NOT EXISTS spend_tracker_import_profiles "
+                "(id text PRIMARY KEY, payload jsonb NOT NULL)"
+            )
 
     def load(self) -> dict:
         state = empty_state()
@@ -54,6 +62,12 @@ class PostgresStore:
                 "ORDER BY (payload->>'created_at'), id"
             )
             state["import_runs"] = [row[0] for row in cursor.fetchall()]
+            cursor.execute("SELECT source, payload FROM spend_tracker_csv_column_mappings")
+            state["csv_column_mappings"] = {
+                source: payload for source, payload in cursor.fetchall()
+            }
+            cursor.execute("SELECT id, payload FROM spend_tracker_import_profiles ORDER BY id")
+            state["import_profiles"] = dict(cursor.fetchall())
         return migrate_categories(state)
 
     def save(self, state: dict) -> None:
@@ -62,6 +76,8 @@ class PostgresStore:
             cursor.execute("DELETE FROM spend_tracker_transactions")
             cursor.execute("DELETE FROM spend_tracker_merchant_mappings")
             cursor.execute("DELETE FROM spend_tracker_import_runs")
+            cursor.execute("DELETE FROM spend_tracker_csv_column_mappings")
+            cursor.execute("DELETE FROM spend_tracker_import_profiles")
             cursor.executemany(
                 "INSERT INTO spend_tracker_transactions (id, payload) VALUES (%s, %s::jsonb)",
                 [(item["id"], json.dumps(item)) for item in state["transactions"]],
@@ -74,4 +90,19 @@ class PostgresStore:
             cursor.executemany(
                 "INSERT INTO spend_tracker_import_runs (id, payload) VALUES (%s, %s::jsonb)",
                 [(item["id"], json.dumps(item)) for item in state["import_runs"]],
+            )
+            cursor.executemany(
+                "INSERT INTO spend_tracker_csv_column_mappings (source, payload) "
+                "VALUES (%s, %s::jsonb)",
+                [
+                    (source, json.dumps(mapping))
+                    for source, mapping in state["csv_column_mappings"].items()
+                ],
+            )
+            cursor.executemany(
+                "INSERT INTO spend_tracker_import_profiles (id, payload) VALUES (%s, %s::jsonb)",
+                [
+                    (key, json.dumps(profile))
+                    for key, profile in state.get("import_profiles", {}).items()
+                ],
             )

@@ -6,7 +6,7 @@ import pytest
 
 from spend_tracker.__main__ import main
 from spend_tracker.classifiers import JevClassifier, JevError, UnconfiguredJevClassifier
-from spend_tracker.config import jev_api_key
+from spend_tracker.config import database_url, jev_api_key
 from spend_tracker.domain import Category, Prediction
 from spend_tracker.parsing import parse_csv, parse_json
 from spend_tracker.services import (
@@ -16,6 +16,53 @@ from spend_tracker.services import (
     spending_summary,
 )
 from spend_tracker.storage import JsonStore, empty_state
+
+
+def test_existing_json_store_without_csv_mappings_still_loads(tmp_path):
+    path = tmp_path / "existing.json"
+    previous_state = empty_state()
+    del previous_state["csv_column_mappings"]
+    path.write_text(json.dumps(previous_state), encoding="utf-8")
+    store = JsonStore(path)
+    assert store.load()["csv_column_mappings"] == {}
+
+
+def test_database_url_reads_local_env_with_shell_override(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SPEND_TRACKER_DATABASE_URL", raising=False)
+    (tmp_path / ".env").write_text(
+        "SPEND_TRACKER_DATABASE_URL=postgresql:///local_test\n", encoding="utf-8"
+    )
+    assert database_url() == "postgresql:///local_test"
+    monkeypatch.setenv("SPEND_TRACKER_DATABASE_URL", "postgresql:///shell_test")
+    assert database_url() == "postgresql:///shell_test"
+
+
+def test_json_to_postgres_migration_preserves_source_and_refuses_overwrite(
+    tmp_path, monkeypatch, capsys
+):
+    source = JsonStore(tmp_path / "source.json")
+    target = JsonStore(tmp_path / "target.json")
+    state = empty_state()
+    state["csv_column_mappings"]["checking"] = {
+        "date": "Posted On",
+        "description": "Details",
+        "amount": "Charge",
+    }
+    source.save(state)
+    monkeypatch.setattr("spend_tracker.__main__.PostgresStore", lambda url: target)
+    command = [
+        "--data",
+        str(source.path),
+        "--database-url",
+        "postgresql:///test",
+        "migrate-to-postgres",
+    ]
+    assert main(command) == 0
+    assert target.load() == source.load()
+    assert main(command) == 1
+    assert "did not overwrite" in capsys.readouterr().err
+    assert source.load() == state
 
 
 class FakeClassifier:

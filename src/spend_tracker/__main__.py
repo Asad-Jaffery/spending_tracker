@@ -1,12 +1,12 @@
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
 from spend_tracker.classifiers import JevClassifier, JevError, UnconfiguredJevClassifier
-from spend_tracker.config import jev_api_key
+from spend_tracker.config import database_url, jev_api_key, local_setting
 from spend_tracker.domain import Category
+from spend_tracker.import_profiles import resolve_import_profile
 from spend_tracker.parsing import InputError, parse_csv, parse_json
 from spend_tracker.postgres import PostgresStore
 from spend_tracker.services import (
@@ -26,25 +26,29 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument(
         "--data",
         type=Path,
-        default=Path(os.getenv("SPEND_TRACKER_DATA", "data/spend-tracker.json")),
-        help="Local JSON data file (default: data/spend-tracker.json)",
+        help="Select a local JSON file instead of the configured PostgreSQL store",
     )
     command.add_argument(
         "--database-url",
-        default=os.getenv("SPEND_TRACKER_DATABASE_URL"),
-        help="Optional PostgreSQL URL; otherwise use the local JSON file",
+        default=database_url(),
+        help="PostgreSQL URL from .env or environment; otherwise use local JSON",
     )
     subcommands = command.add_subparsers(dest="command", required=True)
     importing = subcommands.add_parser("import", help="Import a CSV or synthetic JSON file")
     importing.add_argument("path", type=Path)
     importing.add_argument("--source", required=True, help="Bank/account identifier")
     importing.add_argument("--currency", default="USD")
+    importing.add_argument("--import-preset", help="Built-in or saved card preset ID")
     importing.add_argument("--date-format", choices=("iso", "us"), default="iso")
     importing.add_argument(
         "--amount-convention",
         choices=("expenses_positive", "expenses_negative"),
         default="expenses_positive",
     )
+    importing.add_argument("--date-column", help="Exact CSV header for the date")
+    importing.add_argument("--description-column", help="Exact CSV header for the description")
+    importing.add_argument("--amount-column", help="Exact CSV header for the amount")
+    importing.add_argument("--id-column", help="Exact CSV header for an optional transaction ID")
     transactions = subcommands.add_parser("transactions", help="Show imported transactions and IDs")
     transactions.add_argument(
         "--review", action="store_true", help="Only show items needing review"
@@ -64,6 +68,9 @@ def parser() -> argparse.ArgumentParser:
         "retry-classification", help="Classify previously imported rows needing review"
     )
     subcommands.add_parser("demo", help="Import the synthetic May and June 2026 datasets")
+    subcommands.add_parser(
+        "migrate-to-postgres", help="Copy the local JSON data into an empty PostgreSQL store"
+    )
     server = subcommands.add_parser("serve", help="Run the local dashboard")
     server.add_argument("--port", type=int, default=8765)
     server.add_argument("--no-demo", action="store_true", help="Start with an empty dashboard")
@@ -76,6 +83,7 @@ def print_json(value: object) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    data_path = args.data or Path(local_setting("SPEND_TRACKER_DATA") or "data/spend-tracker.json")
     try:
         if args.command == "jev-test":
             key = jev_api_key()
@@ -90,7 +98,51 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             return 0
-        store = PostgresStore(args.database_url) if args.database_url else JsonStore(args.data)
+        if args.command == "migrate-to-postgres":
+            if not args.database_url:
+                raise ValueError("Set SPEND_TRACKER_DATABASE_URL before migrating")
+            if not data_path.is_file():
+                raise ValueError(f"Local JSON data file not found: {data_path}")
+            source_state = JsonStore(data_path).load()
+            target = PostgresStore(args.database_url)
+            target_state = target.load()
+            if any(
+                target_state[key]
+                for key in (
+                    "transactions",
+                    "merchant_mappings",
+                    "import_runs",
+                    "csv_column_mappings",
+                    "import_profiles",
+                )
+            ):
+                raise ValueError("PostgreSQL store is not empty; migration did not overwrite it")
+            target.save(source_state)
+            migrated = target.load()
+            for key in ("transactions", "import_runs"):
+                if {item["id"]: item for item in source_state[key]} != {
+                    item["id"]: item for item in migrated[key]
+                }:
+                    raise ValueError(f"Migration verification failed for {key}")
+            for key in ("merchant_mappings", "csv_column_mappings", "import_profiles"):
+                if source_state[key] != migrated[key]:
+                    raise ValueError(f"Migration verification failed for {key}")
+            print_json(
+                {
+                    "transactions": len(migrated["transactions"]),
+                    "merchant_mappings": len(migrated["merchant_mappings"]),
+                    "import_runs": len(migrated["import_runs"]),
+                    "csv_column_mappings": len(migrated["csv_column_mappings"]),
+                    "import_profiles": len(migrated["import_profiles"]),
+                    "json_source_retained": str(data_path),
+                }
+            )
+            return 0
+        store = (
+            PostgresStore(args.database_url)
+            if args.database_url and args.data is None
+            else JsonStore(data_path)
+        )
         if args.command == "serve":
             serve(store, port=args.port, seed_demo=not args.no_demo)
             return 0
@@ -101,10 +153,33 @@ def main(argv: list[str] | None = None) -> int:
             store.save(state)
             print_json({"june": june, "may": may})
         elif args.command == "import":
+            if args.import_preset and args.path.suffix.lower() != ".csv":
+                raise ValueError("Card import presets require a CSV file")
             content = args.path.read_bytes()
             if args.path.suffix.lower() == ".csv":
+                base_preset, settings = (
+                    resolve_import_profile(state, args.import_preset, None)
+                    if args.import_preset
+                    else (None, None)
+                )
+                column_mapping = {
+                    field: value
+                    for field, value in (
+                        ("date", args.date_column),
+                        ("description", args.description_column),
+                        ("amount", args.amount_column),
+                        ("id", args.id_column),
+                    )
+                    if value is not None
+                }
                 parsed = parse_csv(
-                    content, date_format=args.date_format, amount_convention=args.amount_convention
+                    content,
+                    date_format=args.date_format,
+                    amount_convention=args.amount_convention,
+                    column_mapping=column_mapping
+                    or state["csv_column_mappings"].get(args.source.strip().casefold()),
+                    import_preset=base_preset,
+                    import_settings=settings,
                 )
             elif args.path.suffix.lower() == ".json":
                 parsed = parse_json(content)
@@ -121,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
                 currency=args.currency,
                 classifier=classifier,
             )
+            if args.path.suffix.lower() == ".csv" and column_mapping and not args.import_preset:
+                state["csv_column_mappings"][args.source.strip().casefold()] = column_mapping
             store.save(state)
             print_json(run)
         elif args.command == "retry-classification":

@@ -4,6 +4,7 @@ import calendar
 from collections import defaultdict
 from datetime import datetime
 
+from spend_tracker.domain import Category
 from spend_tracker.services import money
 
 
@@ -16,6 +17,49 @@ def transactions_for_month(state: dict, month: str | None = None) -> list[dict]:
     if month:
         rows = [item for item in rows if item["date"].startswith(month + "-")]
     return sorted(rows, key=lambda item: (item["date"], item["created_at"]), reverse=True)
+
+
+def spending_over_time(state: dict) -> dict:
+    """Monthly spending by category across the full imported date range."""
+    rows = state["transactions"]
+    categories = [category.value for category in Category]
+    if not rows:
+        return {
+            "categories": categories,
+            "months": [],
+            "total_spending_cents": 0,
+            "transaction_count": 0,
+            "months_tracked": 0,
+        }
+
+    totals: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for item in rows:
+        if not item.get("excluded_from_spending", False):
+            totals[item["date"][:7]][item["category"]] += item["amount_cents"]
+
+    first = min(item["date"][:7] for item in rows)
+    last = max(item["date"][:7] for item in rows)
+    year, month = (int(part) for part in first.split("-"))
+    months = []
+    while f"{year:04d}-{month:02d}" <= last:
+        key = f"{year:04d}-{month:02d}"
+        by_category = {category: totals[key][category] for category in categories}
+        months.append(
+            {
+                "month": key,
+                "total_cents": sum(by_category.values()),
+                "categories": by_category,
+            }
+        )
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+
+    return {
+        "categories": categories,
+        "months": months,
+        "total_spending_cents": sum(item["total_cents"] for item in months),
+        "transaction_count": len(rows),
+        "months_tracked": len({item["date"][:7] for item in rows}),
+    }
 
 
 def dashboard(state: dict, month: str) -> dict:

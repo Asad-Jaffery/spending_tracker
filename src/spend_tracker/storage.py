@@ -37,7 +37,14 @@ def migrate_categories(state: dict) -> dict:
 
 
 def empty_state() -> dict:
-    return {"version": 1, "transactions": [], "merchant_mappings": {}, "import_runs": []}
+    return {
+        "version": 1,
+        "transactions": [],
+        "merchant_mappings": {},
+        "import_runs": [],
+        "csv_column_mappings": {},
+        "import_profiles": {},
+    }
 
 
 class JsonStore:
@@ -57,8 +64,12 @@ class JsonStore:
             or not isinstance(data.get("transactions"), list)
             or not isinstance(data.get("merchant_mappings"), dict)
             or not isinstance(data.get("import_runs"), list)
+            or not isinstance(data.get("csv_column_mappings", {}), dict)
+            or not isinstance(data.get("import_profiles", {}), dict)
         ):
             raise ValueError("Unsupported or invalid data store")
+        data.setdefault("csv_column_mappings", {})
+        data.setdefault("import_profiles", {})
         return migrate_categories(data)
 
     def save(self, state: dict) -> None:
